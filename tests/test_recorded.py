@@ -23,15 +23,18 @@ pytestmark = pytest.mark.skipif(not FILES, reason="لا ردود مسجَّلة 
 def test_adapter_reads_recorded_response(path):
     rec = json.loads(path.read_text(encoding="utf-8"))
     req, resp, meta = rec["request"], rec["response"], rec["meta"]
+    org, ws = meta.get("organization_id") or "org-replay", meta.get("workspace_id") or "wrkspc_replay"
     handler = lambda r: httpx2.Response(200, json=resp, headers={"request-id": meta["request_id"] or "",  # noqa: E731
-                                                                "anthropic-workspace-id": meta["workspace_id"] or ""})
-    prov = AnthropicProvider(api_key="sk-ant-replay", http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+                                                                "anthropic-organization-id": org, "anthropic-workspace-id": ws})
+    prov = AnthropicProvider("sk-ant-replay", expected_org=org, expected_workspace=ws,
+                             http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
     out = prov.complete(model=req["model"], prompt=req.get("prompt", "x"), max_tokens=req["max_tokens"],
                         inference_geo=req.get("inference_geo", "global"))
     u = resp["usage"]
     assert out["usage"]["input_tokens"] == u["input_tokens"] + (u.get("cache_creation_input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
     assert out["usage"]["output_tokens"] == u["output_tokens"]
     assert out["served_model"] == req["model"], "النموذج الذي أجاب غير المطلوب"
+    assert out["identity_ok"] is True
     assert S.actual_cost(req["model"], out["usage"], req.get("inference_geo", "global")) > 0
     if resp["stop_reason"] == "end_turn" and "output_config" in req and "format" in req["output_config"]:
         json.loads(out["text"])                       # المخرجات المنظَّمة JSON صالح

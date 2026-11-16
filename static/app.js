@@ -284,7 +284,7 @@ async function viewReport() {
         "كل طلب مدفوع جديد لهذا المشروع موقوف حتى تسوّيها من فاتورة المزوّد. تبقى محتسبة على الحد مهما مرّ من أيام أو أشهر.") : null,
       h("p", { class: "muted" }, `منطقة المعالجة: ${c.inference_geo === "us" ? "الولايات المتحدة فقط (السعر ×1.1)" : "عامة (السعر القياسي)"}. الحجز تقدير لأسوأ احتمال وليس سقفًا مضمونًا.`),
       c.items.length + c.unresolved_items.length ? h("ul", { class: "list" }, [...c.unresolved_items, ...c.items].map((i) => h("li", {}, h("span", { class: "pill " + (i.is_estimate ? "est" : "act") }, i.state === "unresolved" ? "غير محسوم" : i.state === "reserved" ? "محجوز" : i.is_estimate ? "تقديري" : "فعلي"),
-        " ", h("b", { class: "ltr" }, `$${i.amount_usd.toFixed(2)}`), ` · ${COST_KIND[i.kind] || i.kind}`, i.note ? ` · ${i.note}` : "", h("br"), h("span", { class: "muted ltr" }, date(i.ts)),
+        " ", h("b", { class: "ltr" }, `$${i.amount_usd.toFixed(2)}`), ` · ${COST_KIND[i.kind] || i.kind}`, i.provider === "mock" ? h("span", { class: "pill demo" }, "مزوّد وهمي") : null, i.note ? ` · ${i.note}` : "", h("br"), h("span", { class: "muted ltr" }, date(i.ts)),
         i.state === "unresolved" ? h("form", { onsubmit: async (e) => { e.preventDefault(); try { await api("POST", P(`/costs/${i.id}/resolve`), { amount_usd: Number(val(e.target, "a")) }); render(); } catch (err) { fail(err); } } },
           field("المبلغ الفعلي من فاتورة المزوّد (0 إن لم يُحسب)", h("input", { name: "a", type: "number", step: "0.0001", min: "0", required: true, class: "ltr" })),
           h("button", { class: "ghost" }, "سوِّ")) : null)))

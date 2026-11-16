@@ -18,11 +18,13 @@ import app as A  # noqa: E402
 import discovery as D  # noqa: E402
 import spend as S  # noqa: E402
 import synthetic_batch as SB  # noqa: E402
-from provider import AnthropicProvider  # noqa: E402
+from provider import AnthropicProvider, ProviderConfigError  # noqa: E402
 
 H = {"X-Requested-With": "sellfalcon"}
 HAIKU, OPUS = "claude-haiku-5-5", "claude-opus-5-5"
 SECRET = "sk-ant-test-SECRET-do-not-leak"
+ORG, WS = "0d0e7a3b-52f1-4c7e-9a51-000000000001", "wrkspc_test"
+IDS = {"anthropic-organization-id": ORG, "anthropic-workspace-id": WS}
 
 
 @pytest.fixture(autouse=True)
@@ -68,14 +70,15 @@ def error(status, etype, msg="x"):
 class Api:
     """خادم وهمي: يسجّل كل طلب، ويجيب عن count_tokens، ويأخذ ردود /v1/messages من قائمة."""
 
-    def __init__(self, replies, tokens=800):
+    def __init__(self, replies, tokens=800, count_ids=IDS, reply_ids=IDS):
         self.replies, self.tokens, self.calls, self.counts = list(replies), tokens, [], []
+        self.count_ids, self.reply_ids = count_ids, reply_ids
 
     def __call__(self, request: httpx2.Request):
         body = json.loads(request.content)
         if request.url.path.endswith("/count_tokens"):
             self.counts.append((request, body))
-            return httpx2.Response(200, json={"input_tokens": self.tokens})
+            return httpx2.Response(200, json={"input_tokens": self.tokens}, headers={"request-id": "req_count", **self.count_ids})
         assert request.url.path == "/v1/messages"
         self.calls.append((request, body))
         r = self.replies.pop(0)
@@ -83,10 +86,11 @@ class Api:
             raise r
         if isinstance(r, httpx2.Response):
             return r
-        return httpx2.Response(200, json=r, headers={"request-id": "req_abc12345", "anthropic-workspace-id": "wrkspc_test"})
+        return httpx2.Response(200, json=r, headers={"request-id": "req_abc12345", **self.reply_ids})
 
     def provider(self, **kw):
-        return AnthropicProvider(api_key=SECRET, http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(self)), **kw)
+        return AnthropicProvider(SECRET, expected_org=ORG, expected_workspace=WS,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(self)), **kw)
 
 
 def call(pid, prov, model=HAIKU, **kw):
@@ -120,14 +124,17 @@ def test_request_shape_and_usage_mapping(c):
     assert "tools" not in body and "system" not in body and "fallbacks" not in body
     assert req.headers["authorization"] == f"Bearer {SECRET}" and "x-api-key" not in req.headers   # الـSDK 2.x يرسل المفتاح هكذا
     assert req.headers["anthropic-version"] == "2026-10-21"
-    assert api.counts[0][1] == {"model": HAIKU, "messages": [{"role": "user", "content": "نص مصطنع"}]}
+    # نداء العدّ يحمل مخطط المخرجات نفسه، فالحجز مبني على الإدخال كما سيُرسل
+    assert api.counts[0][1] == {"model": HAIKU, "messages": [{"role": "user", "content": "نص مصطنع"}],
+                                "output_config": body["output_config"]}
     assert r["usage"] == {"input_tokens": 812, "output_tokens": 143, "searches": 0}
     assert r["cost"] == pytest.approx(812 * 0.10 / 1e6 + 143 * 0.50 / 1e6, abs=1e-6)                 # التكلفة تُقرَّب إلى 6 خانات
     assert r["reserved"] == pytest.approx(S.worst_case(HAIKU, 800, 2000))            # الحجز من عدّ المزوّد
     assert (r["request_id"], r["workspace_id"], r["served_model"], r["served_geo"]) == ("req_abc12345", "wrkspc_test", HAIKU, "global")
+    assert r["organization_id"] == ORG and r["identity_ok"] is True
     assert json.loads(r["text"]) == {"sector": "مركز لياقة", "about": "ملخص"}
     row, = rows(pid)
-    assert row["state"] == "settled" and row["is_estimate"] == 0 and "812" in row["note"]
+    assert row["state"] == "settled" and row["is_estimate"] == 0 and "812" in row["note"] and row["provider"] == "anthropic"
 
 
 def test_us_geo_sent_and_priced(c):
@@ -213,7 +220,8 @@ def test_count_tokens_failure_sends_nothing_and_charges_nothing(c):
         if request.url.path.endswith("/count_tokens"):
             return error(401, "authentication_error", "invalid x-api-key")
         raise AssertionError("طلب أُرسل بعد فشل العدّ")
-    prov = AnthropicProvider(api_key=SECRET, http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+    prov = AnthropicProvider(SECRET, expected_org=ORG, expected_workspace=WS,
+                             http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
     with pytest.raises(A.HTTPException) as e:
         call(pid, prov)
     assert e.value.status_code == 502 and rows(pid) == []
@@ -291,29 +299,200 @@ def test_synthetic_batch_content_is_synthetic():
     assert S.worst_case(HAIKU, 4000, 2000) + S.worst_case(OPUS, 4000, 4000) <= SB.CAP_USD
 
 
-def test_synthetic_batch_dry_run_uses_mock_and_touches_no_gate(c):
-    r = SB.run(S.MockProvider(script=[{"text": "{}", "usage": {"input_tokens": 400, "output_tokens": 300}},
-                                      {"text": "{}", "usage": {"input_tokens": 500, "output_tokens": 1500}}]), live=False)
-    assert len(r["calls"]) == 2 and r["total_actual"] == pytest.approx((400 * .1 + 300 * .5) / 1e6 + (500 * 4 + 1500 * 20) / 1e6)
-    assert c.get(f"/api/p/{r['project_id']}/config").json()["gates"] == {}
-    assert c.get(f"/api/p/{r['project_id']}/opps").json() == []
+# ---------- 1. عزل سجل التشغيل الجاف عن الدفعة الحقيقية ----------
+def snapshot(tmp_path):
+    d = tmp_path / "data"
+    return sorted(str(f.relative_to(d)) + ":" + str(f.stat().st_size) for f in d.rglob("*") if f.is_file())
 
 
+def test_dry_run_writes_nothing_to_the_real_ledger(c, tmp_path):
+    pid = proj(c)
+    before, projects_before = snapshot(tmp_path), c.get("/api/projects").json()
+    r = SB.dry_run()
+    assert r["dry_run"] is True and r["provider"] == "mock" and len(r["calls"]) == 2 and r["project"] == SB.DRY_PROJECT
+    assert r["isolated_data_dir"] != str(tmp_path / "data") and not Path(r["isolated_data_dir"]).exists()   # مؤقت وحُذف
+    assert snapshot(tmp_path) == before and c.get("/api/projects").json() == projects_before               # لا ملف تغيّر
+    assert rows(pid) == [] and A.data_dir() == tmp_path / "data"                                             # والبيئة أُعيدت
+
+
+def test_dry_run_does_not_consume_the_live_cap(c):
+    enable_paid()
+    for _ in range(5):                                   # خمس تشغيلات جافة = 10 طلبات وهمية
+        SB.dry_run()
+    api = Api([message(HAIKU), message(OPUS, '{"subject": "ع", "body": "ن"}', inp=420, out=1650)], tokens=350)
+    r = SB.live_run(api.provider())
+    assert len(r["calls"]) == 2 and all("error" not in x for x in r["calls"]) and r["project"] == SB.LIVE_PROJECT
+    assert {x["provider"] for x in rows(r["project_id"])} == {"anthropic"}
+
+
+def test_live_run_refuses_ledger_touched_by_mock(c):
+    enable_paid()
+    pid = SB.project_id(SB.LIVE_PROJECT)
+    S.paid_call(pid, S.MockProvider(default={"input_tokens": 1, "output_tokens": 1}), kind="x", model=HAIKU, prompt="ن", max_tokens=10)
+    api = Api([message()])
+    with pytest.raises(SB.Stop) as e:
+        SB.live_run(api.provider())
+    assert "مزوّد آخر" in str(e.value) and "mock" in str(e.value) and api.calls == [] and api.counts == []
+
+
+def test_cost_rows_record_which_provider_wrote_them(c):
+    enable_paid()
+    pid = proj(c)
+    S.paid_call(pid, S.MockProvider(default={"input_tokens": 1, "output_tokens": 1}), kind="x", model=HAIKU, prompt="ن", max_tokens=10)
+    call(pid, Api([message()]).provider())
+    assert [r["provider"] for r in rows(pid)] == ["mock", "anthropic"]
+
+
+# ---------- 2. غياب المفتاح الصريح يوقف التشغيل ----------
+@pytest.mark.parametrize("key", [None, "", "   ", 0])
+def test_adapter_refuses_to_start_without_explicit_key(key, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-OTHER-TOOL-KEY")       # مفتاح أداة أخرى في البيئة لا يُلتقط
+    with pytest.raises(ProviderConfigError):
+        AnthropicProvider(key, expected_org=ORG, expected_workspace=WS)
+
+
+@pytest.mark.parametrize("org,ws", [("", WS), (ORG, ""), (None, None), ("  ", WS)])
+def test_adapter_refuses_to_start_without_expected_identity(org, ws):
+    with pytest.raises(ProviderConfigError):
+        AnthropicProvider(SECRET, expected_org=org, expected_workspace=ws)
+
+
+@pytest.mark.parametrize("missing", [SB.ENV_KEY, SB.ENV_ORG, SB.ENV_WS])
+@pytest.mark.parametrize("flag", ["--live", "--preflight"])
+def test_batch_stops_before_any_connection_when_a_variable_is_missing(c, monkeypatch, capsys, missing, flag):
+    enable_paid()
+    for n, v in ((SB.ENV_KEY, SECRET), (SB.ENV_ORG, ORG), (SB.ENV_WS, WS)):
+        monkeypatch.setenv(n, v)
+    monkeypatch.delenv(missing)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-OTHER-TOOL-KEY")
+    assert SB.main([flag]) == 2                                             # والـsocket محظور: أي اتصال كان سيفشل الاختبار
+    out = json.loads(capsys.readouterr().out)
+    assert missing in out["stopped"] and SECRET not in out["stopped"]
+    assert not any(p["name"] == SB.LIVE_PROJECT for p in c.get("/api/projects").json())
+
+
+def test_live_run_stops_when_paid_mode_is_off(c):
+    api = Api([message()])
+    with pytest.raises(SB.Stop) as e:
+        SB.live_run(api.provider())
+    assert "مطفأ" in str(e.value) and api.calls == [] and api.counts == []
+
+
+# ---------- 3. التحقق من المنظمة ومساحة العمل قبل الطلب المدفوع ----------
+WRONG = [{"anthropic-organization-id": "ffffffff-0000-4000-8000-00000000dead", "anthropic-workspace-id": WS},   # منظمة أخرى
+         {"anthropic-organization-id": ORG, "anthropic-workspace-id": "wrkspc_other"},                           # مساحة أخرى
+         {"anthropic-organization-id": ORG},                                                                     # المساحة لم تُذكر
+         {"anthropic-workspace-id": WS},                                                                         # المنظمة لم تُذكر
+         {}]                                                                                                     # لا تعريف
+
+
+@pytest.mark.parametrize("ids", WRONG)
+def test_wrong_or_missing_identity_stops_before_the_paid_request(c, ids):
+    enable_paid()
+    pid, api = proj(c), Api([message()], count_ids=ids)
+    with pytest.raises(A.HTTPException) as e:
+        call(pid, api.provider())
+    assert e.value.status_code == 502 and "ليس المتوقع" in e.value.detail
+    assert api.calls == [] and rows(pid) == [] and len(api.counts) == 1       # نداء مجاني واحد، ولا طلب مدفوع ولا حجز
+    assert SECRET not in e.value.detail
+
+
+@pytest.mark.parametrize("ids", WRONG)
+def test_live_batch_stops_at_preflight_on_wrong_identity(c, ids):
+    enable_paid()
+    api = Api([message(), message(OPUS)], count_ids=ids)
+    with pytest.raises(SB.Stop) as e:
+        SB.live_run(api.provider())
+    assert "ليس المتوقع" in str(e.value) and api.calls == []
+    assert rows(SB.project_id(SB.LIVE_PROJECT)) == []
+
+
+def test_identity_is_checked_before_every_paid_request(c):
+    enable_paid()
+    pid, api = proj(c), Api([message(), message(), message()])
+    prov = api.provider()
+    call(pid, prov); call(pid, prov)
+    assert len(api.counts) == 2 and len(api.calls) == 2                       # فحص لكل طلب، لا مرة واحدة
+    api.count_ids = WRONG[1]                                                  # المفتاح صار يصل إلى مساحة أخرى
+    with pytest.raises(A.HTTPException):
+        call(pid, prov)
+    assert len(api.calls) == 2
+
+
+def test_paid_response_from_unexpected_identity_pauses_project(c):
+    """الفحص المسبق مرّ لكن الرد المدفوع جاء بتعريف آخر: لا يُستدرك، فتُسجَّل التكلفة ويُوقف المشروع."""
+    enable_paid()
+    pid, api = proj(c), Api([message()], reply_ids=WRONG[1])
+    r = call(pid, api.provider())
+    assert r["identity_ok"] is False and r["cost"] > 0 and rows(pid)[0]["state"] == "settled"
+    assert any(a["action"] == "spend.identity_mismatch" for a in c.get("/api/audit").json())
+    with pytest.raises(A.HTTPException) as e:
+        call(pid, Api([message()]).provider())
+    assert e.value.status_code == 503
+
+
+def test_preflight_is_free_and_compares_identity():
+    for ids, ok in ((IDS, True), (WRONG[0], False), ({}, False)):
+        def handler(request, ids=ids):
+            assert request.url.path.endswith("/count_tokens"), "الفحص المجاني أرسل طلبًا مدفوعًا"
+            return httpx2.Response(200, json={"input_tokens": 9}, headers={"request-id": "req_pre", **ids,
+                                                                          "anthropic-ratelimit-requests-remaining": "49"})
+        prov = AnthropicProvider(SECRET, expected_org=ORG, expected_workspace=WS,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+        r = prov.preflight()
+        assert r["ok"] is ok and r["host"] == "api.anthropic.com" and r["expected"] == IDS
+        assert r["got"] == {h: ids.get(h) for h in IDS}
+
+
+# ---------- 4. مخطط المخرجات داخل عدّ الإدخال ----------
+def test_schema_is_counted_in_input_and_drives_the_reservation(c):
+    """خادم وهمي يعدّ 40 توكنًا إضافية حين يحمل الطلب مخططًا: الحجز يجب أن يتبع العدّ الأكبر."""
+    enable_paid()
+    pid = proj(c)
+
+    class CountsSchema(Api):
+        def __call__(self, request):
+            if request.url.path.endswith("/count_tokens"):
+                body = json.loads(request.content)
+                self.counts.append((request, body))
+                n = 300 + (40 if "format" in body.get("output_config", {}) else 0)
+                return httpx2.Response(200, json={"input_tokens": n}, headers={"request-id": "r", **IDS})
+            return super().__call__(request)
+    api = CountsSchema([message(), message()])
+    plain = call(pid, api.provider())
+    with_schema = call(pid, api.provider(), extra={"schema": D.EXTRACT_SCHEMA, "effort": "low"})
+    assert plain["reserved"] == pytest.approx(S.worst_case(HAIKU, 300, 2000))
+    assert with_schema["reserved"] == pytest.approx(S.worst_case(HAIKU, 340, 2000), abs=1e-9)
+    assert with_schema["reserved"] > plain["reserved"]
+    assert "output_config" not in api.counts[0][1] and api.counts[1][1]["output_config"] == api.calls[1][1]["output_config"]
+
+
+def test_pipeline_counts_exactly_what_it_sends(c):
+    enable_paid()
+    api = Api([message(HAIKU), message(OPUS, '{"subject": "ع", "body": "ن"}')])
+    SB.live_run(api.provider())
+    counted, sent = [b for _, b in api.counts[1:]], [b for _, b in api.calls]      # counts[0] هو الفحص المسبق
+    for cnt, snd in zip(counted, sent, strict=True):
+        assert cnt["messages"] == snd["messages"] and cnt["model"] == snd["model"]
+        assert cnt["output_config"] == snd["output_config"] and "format" in cnt["output_config"]
+
+
+# ---------- الدفعة عبر الموصّل ----------
 def test_synthetic_batch_live_path_against_fake_api(c, tmp_path):
     enable_paid()
     api = Api([message(HAIKU, inp=310, out=220), message(OPUS, '{"subject": "ع", "body": "ن"}', inp=420, out=1650)], tokens=350)
-    r = SB.run(api.provider(record_dir=str(tmp_path / "rec"), record_prompts=True), live=True)
+    r = SB.live_run(api.provider(record_dir=str(tmp_path / "rec"), record_prompts=True))
     assert len(api.calls) == 2 and len(list((tmp_path / "rec").glob("*.json"))) == 2
-    assert r["total_actual"] == pytest.approx((310 * .1 + 220 * .5) / 1e6 + (420 * 4 + 1650 * 20) / 1e6)
+    assert r["total_actual"] == pytest.approx((310 * .1 + 220 * .5) / 1e6 + (420 * 4 + 1650 * 20) / 1e6, abs=2e-6)
     assert r["total_reserved"] == pytest.approx(S.worst_case(HAIKU, 350, 2000) + S.worst_case(OPUS, 350, 4000))
     assert r["ledger"]["actual"] == pytest.approx(r["total_actual"]) and r["ledger"]["unresolved"] == 0
-    assert all(cl["workspace_id"] == "wrkspc_test" for cl in r["calls"])
+    assert r["preflight"]["ok"] and all(x["workspace_id"] == WS and x["organization_id"] == ORG and x["identity_ok"] for x in r["calls"])
 
 
 def test_synthetic_batch_stops_at_first_failure(c):
     enable_paid()
     api = Api([httpx2.ReadTimeout("t"), message(OPUS)])
-    r = SB.run(api.provider(), live=True)
+    r = SB.live_run(api.provider())
     assert len(api.calls) == 1 and len(r["calls"]) == 1 and r["calls"][0]["status"] == 502
     assert r["ledger"]["unresolved"] > 0
 
@@ -332,13 +511,3 @@ def test_environment_variables_cannot_redirect_or_reauthenticate(c, monkeypatch)
         assert "OTHER-TOOL" not in str(dict(req.headers)) and "other-tool-token" not in str(dict(req.headers))
 
 
-def test_preflight_is_free_and_reports_identity_headers():
-    def handler(request):
-        assert request.url.path.endswith("/count_tokens"), "الفحص المجاني أرسل طلبًا مدفوعًا"
-        return httpx2.Response(200, json={"input_tokens": 9}, headers={
-            "request-id": "req_pre", "anthropic-organization-id": "org-123", "anthropic-workspace-id": "wrkspc_syn",
-            "anthropic-ratelimit-requests-remaining": "49"})
-    prov = AnthropicProvider(api_key=SECRET, http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
-    r = prov.preflight()
-    assert r == {"host": "api.anthropic.com", "input_tokens": 9, "request_id": "req_pre",
-                 "identity_headers": {"anthropic-organization-id": "org-123", "anthropic-workspace-id": "wrkspc_syn"}}

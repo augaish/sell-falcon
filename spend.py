@@ -74,7 +74,7 @@ def today_total(p) -> float:
                      (A.now()[:10],)).fetchone()[0]
 
 
-def reserve(pid: int, amount: float, kind: str, note: str) -> int:
+def reserve(pid: int, amount: float, kind: str, note: str, provider: str | None = None) -> int:
     """فحص الحدود وتسجيل الحجز داخل معاملة واحدة تأخذ قفل الكتابة على قاعدة المشروع (BEGIN IMMEDIATE)،
     فلا يمر فحصان متزامنان من خيطين أو من عمليتين مختلفتين على الرصيد نفسه."""
     if _setting("paid_paused") == "1":
@@ -99,8 +99,8 @@ def reserve(pid: int, amount: float, kind: str, note: str) -> int:
             elif today_total(p) + amount > daily_cap(cfg) + 1e-9:
                 err = HTTPException(402, f"تجاوز حد الإنفاق اليومي للمشروع ({daily_cap(cfg)}$). الإجراء موقوف")
             else:
-                rid = p.execute("INSERT INTO costs(ts,kind,amount_usd,is_estimate,note,state) VALUES(?,?,?,?,?,?)",
-                                (A.now(), kind, amount, 1, note, "reserved")).lastrowid
+                rid = p.execute("INSERT INTO costs(ts,kind,amount_usd,is_estimate,note,state,provider) VALUES(?,?,?,?,?,?,?)",
+                                (A.now(), kind, amount, 1, note, "reserved", provider)).lastrowid
             p.execute("COMMIT")
         except BaseException:
             p.execute("ROLLBACK")
@@ -126,12 +126,13 @@ def paid_call(pid: int, provider, *, kind: str, model: str, prompt: str, max_tok
         raise HTTPException(400, "نموذج بلا سعر مسجل")
     with A.pdb(pid) as p:
         geo = A.get_cfg(p)["inference_geo"]
-    in_tok = provider.count_tokens(model, prompt)
+    pname = getattr(provider, "name", "mock" if getattr(provider, "is_mock", False) else type(provider).__name__)
+    in_tok = provider.count_tokens(model, prompt, **(extra or {}))  # يشمل مخطط المخرجات إن وُجد
     if in_tok > MAX_INPUT_TOKENS:
         raise HTTPException(400, f"الإدخال أكبر من الحد ({MAX_INPUT_TOKENS} توكن)")
     worst = worst_case(model, in_tok, max_tokens, max_searches, geo)
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        rid = reserve(pid, worst, kind, f"{model} · محاولة {attempt} · حجز أسوأ احتمال")
+        rid = reserve(pid, worst, kind, f"{model} · محاولة {attempt} · حجز أسوأ احتمال", pname)
         try:
             res = provider.complete(model=model, prompt=prompt, max_tokens=max_tokens, max_searches=max_searches,
                                    inference_geo=geo, **(extra or {}))
@@ -152,6 +153,11 @@ def paid_call(pid: int, provider, *, kind: str, model: str, prompt: str, max_tok
         _update(pid, rid, "UPDATE costs SET amount_usd=?, is_estimate=0, state='settled', note=? WHERE id=?",
                 (cost, f"{model} · {geo} · إدخال {res['usage'].get('input_tokens', 0)} · إخراج {res['usage'].get('output_tokens', 0)}"
                        f" · بحث {res['usage'].get('searches', 0)}"))
+        if res.get("identity_ok") is False:  # الرد المدفوع جاء من حساب غير المتوقع: لا يُستدرك، فيُوقف المشروع
+            with A.pdb(pid) as p:
+                p.execute("INSERT INTO config VALUES('paid_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+            A.audit(user, pid, "spend.identity_mismatch",
+                    f"cost #{rid}: منظمة {res.get('organization_id')} ومساحة {res.get('workspace_id')} — أُوقف المشروع")
         served = res.get("served_model")
         if served and served != model:  # السعر المحسوب قد لا يطابق ما حُسب فعلًا
             with A.pdb(pid) as p:
@@ -175,7 +181,9 @@ class MockProvider:
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def count_tokens(self, model: str, prompt: str) -> int:
+    name = "mock"
+
+    def count_tokens(self, model: str, prompt: str, **_) -> int:
         return max(1, len(prompt) // 2)
 
     def complete(self, **kw) -> dict:

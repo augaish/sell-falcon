@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, opp_id INTEGER NOT NUL
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, opp_id INTEGER NOT NULL REFERENCES opps(id) ON DELETE CASCADE,
   ts TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT);
 CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL,
-  amount_usd REAL NOT NULL, is_estimate INTEGER NOT NULL, note TEXT, state TEXT NOT NULL DEFAULT 'settled');
+  amount_usd REAL NOT NULL, is_estimate INTEGER NOT NULL, note TEXT, state TEXT NOT NULL DEFAULT 'settled', provider TEXT);
 CREATE TABLE IF NOT EXISTS sites(domain TEXT PRIMARY KEY, terms_status TEXT NOT NULL DEFAULT 'unreviewed',
   terms_url TEXT, robots TEXT, updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS site_pages(id INTEGER PRIMARY KEY, opp_id INTEGER NOT NULL REFERENCES opps(id) ON DELETE CASCADE,
@@ -76,7 +76,7 @@ CREATE TRIGGER IF NOT EXISTS osm_readonly BEFORE UPDATE ON osm_records
   BEGIN SELECT RAISE(ABORT, 'osm_records read-only'); END;
 """
 MIGRATIONS = [("costs", "state", "TEXT NOT NULL DEFAULT 'settled'"), ("opps", "osm_ref", "TEXT"), ("opps", "about", "TEXT"),
-              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'"), ("opps", "archived_at", "TEXT")]
+              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'"), ("opps", "archived_at", "TEXT"), ("costs", "provider", "TEXT")]
 # بوابات يفتحها المالك بتسجيل من راجع وماذا راجع. بدونها لا يعمل الاكتشاف الآلي.
 GATES = {"data_assessment": "تقييم نظامية جمع البيانات ومعالجتها ونقلها",
          "osm_license": "مراجعة نص رخصة OpenStreetMap (ODbL)"}
