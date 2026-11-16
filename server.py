@@ -32,6 +32,9 @@ def check_data_dir():
 def build() -> FastAPI:
     check_data_dir()
     A.bootstrap_owner()
+    seeded = A.bootstrap_projects()
+    if seeded:
+        print("sellfalcon: initial projects created:", ", ".join(seeded), flush=True)
     base = A.base_path()
     if not base:
         return A.app

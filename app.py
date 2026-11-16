@@ -173,6 +173,31 @@ def bootstrap_owner():
     return True
 
 
+# المشاريع الأولية كما وصفها المالك. العرض ونوع الشراكة يُتركان فارغين: لا تُكتب مزايا لم يؤكدها.
+INITIAL_PROJECTS = [
+    ("WTExcellence", {"audience": "جهات قد تحتاج حلول التميز والجودة والامتثال", "keywords": "جودة، امتثال، تميز"}),
+    ("Calgym", {"audience": "أندية ومدربون وشركاء محتملون للتطبيق", "keywords": "نادي، مدرب"}),
+    ("Oshhh.fun", {"audience": "منظمو فعاليات وشركات وشركاء توزيع أو ترويج مناسبون", "keywords": "فعاليات، توزيع، ترويج"}),
+]
+
+
+def bootstrap_projects() -> list[str]:
+    """ينشئ المشاريع الأولية مرة واحدة، فقط إن طُلب ذلك بالمتغير SELLFALCON_SEED_PROJECTS=1 ولم يوجد أي مشروع."""
+    if os.environ.get("SELLFALCON_SEED_PROJECTS") != "1":
+        return []
+    with core() as c:
+        if c.execute("SELECT 1 FROM projects").fetchone():
+            return []
+        ids = [(c.execute("INSERT INTO projects(name,created) VALUES(?,?)", (name, now())).lastrowid, name, cfg)
+               for name, cfg in INITIAL_PROJECTS]
+    for pid, name, cfg in ids:
+        with pdb(pid) as p:
+            for k, v in {**cfg, "region": "السعودية"}.items():
+                p.execute("INSERT INTO config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+        audit("bootstrap", pid, "project.create", name)
+    return [n for _, n, _ in ids]
+
+
 def auth(request: Request) -> dict:
     sid = request.cookies.get(COOKIE)
     if not sid:

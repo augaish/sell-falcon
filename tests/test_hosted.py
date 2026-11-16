@@ -294,3 +294,23 @@ def test_selfcheck_detects_data_surviving_a_restart(monkeypatch):
     monkeypatch.setattr(HS, "STARTED_AT", "2999-01-01T00:00:00+00:00")
     b = by()
     assert b["البيانات نجت من إعادة تشغيل"]["ok"] is True and b["الاتصال عبر HTTPS"]["ok"] is True
+
+
+def test_initial_projects_seeded_once_and_invent_nothing(monkeypatch):
+    assert A.bootstrap_projects() == []                                    # بلا المتغير لا يُنشأ شيء
+    monkeypatch.setenv("SELLFALCON_SEED_PROJECTS", "1")
+    assert A.bootstrap_projects() == ["WTExcellence", "Calgym", "Oshhh.fun"]
+    assert A.bootstrap_projects() == []                                    # مرة واحدة: لا تكرار ولا كتابة فوق تعديلات المالك
+    cl = login(TestClient(A.app))
+    ps = cl.get("/api/projects").json()
+    assert [p["name"] for p in ps] == ["WTExcellence", "Calgym", "Oshhh.fun"]
+    for p in ps:
+        cfg = cl.get(f"/api/p/{p['id']}/config").json()
+        assert cfg["audience"] and cfg["keywords"] and cfg["region"] == "السعودية"
+        assert cfg["offer"] == "" and cfg["partnership"] == ""             # لا عرض مختلق
+        assert float(cfg["monthly_cap_usd"]) == 0 and cfg["gates"] == {} and cfg["compliance"] == [] and cfg["key_slot"] == ""
+        assert cl.get(f"/api/p/{p['id']}/opps").json() == []               # لا جهات ولا بيانات تجريبية
+    by = {x["label"]: x for x in cl.get("/api/selfcheck").json()["checks"]}
+    assert by["بوابات جمع البيانات مغلقة — Calgym"]["ok"] and by["لا إرسال مسجل — Oshhh.fun"]["ok"]
+    cl.put(f"/api/p/{ps[0]['id']}/config", json={"audience": "تعديل المالك"})
+    assert A.bootstrap_projects() == [] and cl.get(f"/api/p/{ps[0]['id']}/config").json()["audience"] == "تعديل المالك"
