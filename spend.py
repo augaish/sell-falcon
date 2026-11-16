@@ -118,7 +118,8 @@ def _update(pid: int, rid: int, sql: str, args: tuple):
 
 
 def paid_call(pid: int, provider, *, kind: str, model: str, prompt: str, max_tokens: int,
-              max_searches: int = 0, user: str = "system") -> dict:
+              max_searches: int = 0, user: str = "system", extra: dict | None = None) -> dict:
+    """extra: خيارات تُمرَّر للمزوّد كما هي (schema، effort). لا تغيّر الحجز."""
     if not getattr(provider, "is_mock", False) and _setting("paid_enabled") != "1":
         raise HTTPException(403, "الخدمات المدفوعة غير مفعّلة")
     if model not in PRICES:
@@ -132,9 +133,13 @@ def paid_call(pid: int, provider, *, kind: str, model: str, prompt: str, max_tok
     for attempt in range(1, MAX_ATTEMPTS + 1):
         rid = reserve(pid, worst, kind, f"{model} · محاولة {attempt} · حجز أسوأ احتمال")
         try:
-            res = provider.complete(model=model, prompt=prompt, max_tokens=max_tokens, max_searches=max_searches, inference_geo=geo)
-        except Rejected:
+            res = provider.complete(model=model, prompt=prompt, max_tokens=max_tokens, max_searches=max_searches,
+                                   inference_geo=geo, **(extra or {}))
+        except Rejected as e:
             _update(pid, rid, "DELETE FROM costs WHERE id=?", ())
+            if getattr(e, "permanent", False):  # مفتاح، رصيد، صيغة: الإعادة لا تفيد
+                A.audit(user, pid, "spend.rejected", str(e)[:200])
+                raise HTTPException(502, f"رفض المزوّد الطلب ولن تُعاد المحاولة ({e}). لم تُسجَّل تكلفة")
             continue
         except BaseException as e:  # أي انقطاع آخر يُعامل كغير محسوم: الحجز يبقى كاملًا
             _update(pid, rid, "UPDATE costs SET state='unresolved', note=? WHERE id=?",
@@ -147,11 +152,17 @@ def paid_call(pid: int, provider, *, kind: str, model: str, prompt: str, max_tok
         _update(pid, rid, "UPDATE costs SET amount_usd=?, is_estimate=0, state='settled', note=? WHERE id=?",
                 (cost, f"{model} · {geo} · إدخال {res['usage'].get('input_tokens', 0)} · إخراج {res['usage'].get('output_tokens', 0)}"
                        f" · بحث {res['usage'].get('searches', 0)}"))
+        served = res.get("served_model")
+        if served and served != model:  # السعر المحسوب قد لا يطابق ما حُسب فعلًا
+            with A.pdb(pid) as p:
+                p.execute("INSERT INTO config VALUES('paid_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+            A.audit(user, pid, "spend.model_mismatch", f"cost #{rid}: طُلب {model} وأجاب {served} — أُوقف المشروع")
         if cost > worst + 1e-9:
             with A.pdb(pid) as p:
                 p.execute("INSERT INTO config VALUES('paid_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'")
             A.audit(user, pid, "spend.over_reservation", f"cost #{rid}: فعلي {cost}$ > حجز {worst}$ — أُوقف المشروع")
-        return {"text": res.get("text", ""), "usage": res["usage"], "cost": cost, "reserved": worst, "attempts": attempt}
+        return {**{k: v for k, v in res.items() if k not in ("text", "usage")},
+                "text": res.get("text", ""), "usage": res["usage"], "cost": cost, "reserved": worst, "attempts": attempt}
     raise HTTPException(502, "رفض المزوّد الطلب مرتين. لم تُسجَّل تكلفة")
 
 

@@ -4,6 +4,7 @@
   python manage.py seed-demo                     يضيف المشاريع الثلاثة ببيانات تجريبية موسومة
   python manage.py backup out.tar.gz
   python manage.py restore out.tar.gz NEW_DATA_DIR
+  python manage.py paid on|off                   يفعّل أو يطفئ السماح بمزوّد حقيقي (مطفأ افتراضيًا)
   python manage.py purge                         يحذف الفرص المغلقة التي تجاوزت مدة الاحتفاظ
 """
 import secrets
@@ -108,6 +109,15 @@ if __name__ == "__main__":
         backup(*args)
     elif cmd == "restore":
         restore(*args)
+    elif cmd == "paid":
+        # مفتاح التشغيل المدفوع. يبقى مطفأً حتى يوافق المالك صراحةً.
+        if args[:1] not in (["on"], ["off"]):
+            sys.exit("الاستخدام: python manage.py paid on|off")
+        with A.core() as c:
+            c.execute("INSERT INTO settings VALUES('paid_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      ("1" if args[0] == "on" else "0",))
+        A.audit("cli", None, "paid.enable" if args[0] == "on" else "paid.disable")
+        print("paid_enabled =", args[0])
     elif cmd == "purge":
         with A.core() as c:
             ids = [r["id"] for r in c.execute("SELECT id FROM projects")]
