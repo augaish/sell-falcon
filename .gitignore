@@ -5,3 +5,4 @@ screenshots/
 .venv/
 .env
 *.tar.gz
+recordings/
