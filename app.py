@@ -83,7 +83,7 @@ GATES = {"data_assessment": "تقييم نظامية جمع البيانات و�
 CONFIG_DEFAULTS = {
     "audience": "", "region": "", "partnership": "", "offer": "", "keywords": "",
     "monthly_cap_usd": "0", "daily_cap_usd": "", "paid_paused": "0", "retention_days": "0", "followup_days": "7",
-    "archive_new_days": "0", "inference_geo": "global",
+    "archive_new_days": "0", "inference_geo": "global", "key_slot": "",
     "compliance": "[]", "gates": "{}",
 }
 
@@ -148,8 +148,33 @@ def create_user(email: str, pw: str, role: str = "owner"):
 _fails: dict[str, list[float]] = {}
 
 
+COOKIE = "sellfalcon_sid"  # اسم خاص ومسار محصور بالتطبيق، حتى لا يختلط بملفات موقع آخر على النطاق نفسه
+MIN_PASSWORD = 12
+
+
+def base_path() -> str:
+    """المسار الفرعي الذي يُخدم تحته التطبيق، مثل /sellfalcon. فارغ = الجذر."""
+    b = os.environ.get("SELLFALCON_BASE_PATH", "").strip().rstrip("/")
+    if b and not re.fullmatch(r"(/[A-Za-z0-9_-]+)+", b):
+        raise RuntimeError("SELLFALCON_BASE_PATH غير صالح")
+    return b
+
+
+def bootstrap_owner():
+    """ينشئ حساب المالك من أسرار الاستضافة عند أول تشغيل فقط. لا يغيّر حسابًا موجودًا."""
+    email, pw = os.environ.get("SELLFALCON_OWNER_EMAIL", "").strip().lower(), os.environ.get("SELLFALCON_OWNER_PASSWORD", "")
+    with core() as c:
+        if c.execute("SELECT 1 FROM users").fetchone() or not email:
+            return False
+    if len(pw) < MIN_PASSWORD:
+        raise RuntimeError(f"SELLFALCON_OWNER_PASSWORD أقصر من {MIN_PASSWORD} حرفًا")
+    create_user(email, pw, "owner")
+    audit("bootstrap", None, "owner.create", email)
+    return True
+
+
 def auth(request: Request) -> dict:
-    sid = request.cookies.get("sid")
+    sid = request.cookies.get(COOKIE)
     if not sid:
         raise HTTPException(401, "سجّل الدخول")
     with core() as c:
@@ -175,8 +200,10 @@ async def headers(request: Request, call_next):
     r.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["Referrer-Policy"] = "no-referrer"
-    if request.url.path.startswith("/api"):
+    if "/api/" in request.url.path:
         r.headers["Cache-Control"] = "no-store"
+    if os.environ.get("SELLFALCON_SECURE") == "1":
+        r.headers["Strict-Transport-Security"] = "max-age=31536000"
     return r
 
 
@@ -195,7 +222,7 @@ def login(response: Response, body: dict = Body(...)):
         c.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
         c.execute("INSERT INTO sessions VALUES(?,?,?)",
                   (hashlib.sha256(tok.encode()).hexdigest(), u["id"], time.time() + 7 * 86400))
-    response.set_cookie("sid", tok, httponly=True, samesite="strict", max_age=7 * 86400,
+    response.set_cookie(COOKIE, tok, httponly=True, samesite="strict", max_age=7 * 86400, path=base_path() or "/",
                         secure=os.environ.get("SELLFALCON_SECURE") == "1")
     audit(email, None, "login")
     return {"email": email, "role": u["role"]}
@@ -203,11 +230,34 @@ def login(response: Response, body: dict = Body(...)):
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
-    sid = request.cookies.get("sid", "")
+    sid = request.cookies.get(COOKIE, "")
     with core() as c:
         c.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(sid.encode()).hexdigest(),))
-    response.delete_cookie("sid")
+    response.delete_cookie(COOKIE, path=base_path() or "/")
     return {}
+
+
+@app.post("/api/password")
+def change_password(request: Request, body: dict = Body(...), u=Depends(auth)):
+    new = str(body.get("new", ""))
+    if len(new) < MIN_PASSWORD:
+        raise HTTPException(400, f"كلمة المرور الجديدة أقصر من {MIN_PASSWORD} حرفًا")
+    with core() as c:
+        row = c.execute("SELECT * FROM users WHERE email=?", (u["email"],)).fetchone()
+        if not check_pw(str(body.get("old", "")), row["pw_hash"]):
+            raise HTTPException(403, "كلمة المرور الحالية غير صحيحة")
+        c.execute("UPDATE users SET pw_hash=? WHERE id=?", (hash_pw(new), row["id"]))
+        keep = hashlib.sha256(request.cookies.get(COOKIE, "").encode()).hexdigest()
+        c.execute("DELETE FROM sessions WHERE user_id=? AND token_hash!=?", (row["id"], keep))  # يخرج الأجهزة الأخرى
+    audit(u["email"], None, "password.change")
+    return {}
+
+
+@app.get("/healthz")
+def healthz():
+    with core() as c:
+        c.execute("SELECT 1").fetchone()
+    return {"ok": True}
 
 
 @app.get("/api/me")
@@ -493,6 +543,10 @@ def config_put(pid: int, body: dict = Body(...), u=Depends(auth)):
                 v = "1" if v in (True, 1, "1") else "0"
             elif k == "daily_cap_usd" and s(v) == "":
                 v = ""
+            elif k == "key_slot":
+                v = s(v, 20).upper()
+                if v and not re.fullmatch(r"[A-Z0-9_]{1,20}", v):
+                    raise HTTPException(400, "خانة المفتاح: حروف إنجليزية كبيرة وأرقام وشرطة سفلية فقط")
             elif k == "inference_geo":
                 if v not in ("global", "us"):
                     raise HTTPException(400, "منطقة المعالجة: global أو us")
@@ -930,6 +984,7 @@ def audit_list(u=Depends(auth)):
 
 
 import discovery  # noqa: E402,F401  (في آخر الملف: discovery يسجّل مساراته بنفسه أيًّا كان ترتيب الاستيراد)
+import hosted  # noqa: E402,F401
 
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 

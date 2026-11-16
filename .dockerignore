@@ -1,0 +1,9 @@
+data/
+recordings/
+screenshots/
+tests/
+docs/
+.git/
+.venv/
+__pycache__/
+*.md

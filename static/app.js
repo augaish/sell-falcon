@@ -24,7 +24,8 @@ function toast(msg) {
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 5000);
 }
 async function api(method, path, body) {
-  const r = await fetch("/api" + path, {
+  // مسارات نسبية: يعمل التطبيق في الجذر أو تحت مسار فرعي مثل /sellfalcon/
+  const r = await fetch("api" + path, {
     method, headers: { "Content-Type": "application/json", "X-Requested-With": "sellfalcon" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -109,7 +110,7 @@ async function viewList() {
       h("button", { class: "grow", onclick: () => { S.adding = true; render(); } }, "إضافة فرصة"),
       h("label", { class: "btn ghost" }, "استيراد CSV",
         h("input", { type: "file", accept: ".csv,text/csv", hidden: true, onchange: importCsv })),
-      h("a", { class: "btn ghost", href: `/api/p/${S.pid}/export.csv`, download: "" }, "تصدير")),
+      h("a", { class: "btn ghost", href: `api/p/${S.pid}/export.csv`, download: "" }, "تصدير")),
     shown.length ? h("div", { class: "list" }, shown.map((o) =>
       h("button", { class: "opp", onclick: () => { S.oid = o.id; render(); } },
         h("span", { class: "score", title: "درجة الأولوية" }, o.score),
@@ -209,6 +210,7 @@ async function viewOpp() {
         h("button", { class: "danger", onclick: act(async () => { if (confirm("ستُحذف بيانات هذا الموقع ولن يُقرأ في أي مشروع. متابعة؟")) await api("POST", P("/sites/terms"), { domain: o.site.domain, decision: "denied" }); }) }, "لا تسمح")) : null,
       !o.site || o.site.terms_status !== "denied" ? h("button", { class: "ghost", onclick: act(() => api("POST", P(`/opps/${o.id}/read-site`))) },
         !o.site ? "اقرأ الصفحة الرئيسية" : o.site.terms_status === "allowed" ? "اقرأ صفحتي التواصل ومن نحن وأضف العناوين العامة" : "أعد قراءة الصفحة الرئيسية") : null,
+      o.site && o.site.terms_status === "allowed" && o.site_pages.length ? h("button", { class: "ghost", onclick: act(async () => { if (confirm("طلب مدفوع (Haiku 5.5): يُرسل نص صفحات الموقع، بعد حذف العناوين والأرقام، إلى النموذج. متابعة؟")) await api("POST", P(`/opps/${o.id}/extract`)); }) }, "استخرج المجال والملخص بالنموذج") : null,
       o.site_pages.length ? h("ul", { class: "list" }, o.site_pages.map((pg) => h("li", {}, ext(pg.url), h("br"), h("span", { class: "muted ltr" }, date(pg.fetched_at))))) : null) : null,
     h("section", { class: "card" }, h("h2", {}, "متطلبات التواصل مع المستلم"),
       h("p", { class: "muted" }, "اعتماد نص الرسالة لا يكفي. يجب أن يتوفر أساس موثق للتواصل مع هذا المستلم ومراجعة نظامية لدولته."),
@@ -226,6 +228,10 @@ async function viewOpp() {
       h("div", { class: "row" },
         h("button", { class: "ghost", onclick: act(() => api("POST", P(`/opps/${o.id}/drafts`), { lang: "ar" })) }, "مسودة عربية"),
         h("button", { class: "ghost", onclick: act(() => api("POST", P(`/opps/${o.id}/drafts`), { lang: "en" })) }, "English draft")),
+      h("p", { class: "muted" }, "المسودة بالنموذج طلب مدفوع (Opus 5.5، يُحجز له نحو 0.10$). تعمل فقط بعد تسجيل تقييم البيانات وتفعيل التشغيل المدفوع، وتبقى مسودة تنتظر مراجعتك."),
+      h("div", { class: "row" },
+        h("button", { class: "ghost", onclick: act(async () => { if (confirm("طلب مدفوع من رصيد المشروع. متابعة؟")) await api("POST", P(`/opps/${o.id}/draft-llm`), { lang: "ar" }); }) }, "مسودة عربية بالنموذج"),
+        h("button", { class: "ghost", onclick: act(async () => { if (confirm("طلب مدفوع من رصيد المشروع. متابعة؟")) await api("POST", P(`/opps/${o.id}/draft-llm`), { lang: "en" }); }) }, "English draft by model")),
       o.drafts.map((d) => h("form", { class: "draft", onsubmit: act((e) => api("PUT", P(`/drafts/${d.id}`), { subject: val(e.target, "s"), body: e.target.elements.b.value })) },
         h("div", { class: "row between" }, h("b", {}, d.lang === "ar" ? "عربية" : "English"),
           h("span", { class: "pill " + (d.status === "approved" ? "act" : d.status === "rejected" ? "closed" : "est") },
@@ -313,7 +319,7 @@ async function viewConfig() {
     out.push(
       h("form", { class: "card", onsubmit: (e) => { e.preventDefault(); const f = e.target;
         save({ audience: val(f, "audience"), region: val(f, "region"), partnership: val(f, "partnership"), offer: val(f, "offer"), keywords: val(f, "keywords"),
-          monthly_cap_usd: val(f, "cap"), retention_days: val(f, "ret"), followup_days: val(f, "fu"), archive_new_days: val(f, "arc"), inference_geo: val(f, "geo") }); } },
+          monthly_cap_usd: val(f, "cap"), retention_days: val(f, "ret"), followup_days: val(f, "fu"), archive_new_days: val(f, "arc"), inference_geo: val(f, "geo"), key_slot: val(f, "slot") }); } },
         h("h2", {}, "إعداد المشروع"),
         field("الجمهور المستهدف", h("textarea", { name: "audience", value: c.audience, rows: 2 })),
         h("div", { class: "two" }, field("المنطقة", h("input", { name: "region", value: c.region, placeholder: "لم تُحدَّد" })),
@@ -324,6 +330,7 @@ async function viewConfig() {
           field("اقترح متابعة بعد (أيام)", h("input", { name: "fu", type: "number", min: "1", value: c.followup_days, class: "ltr" }))),
         field("أرشف الجهات التي تبقى «جديد» بعد (أيام، 0 = لا أرشفة). الأرشفة قابلة للاستعادة ولا تحذف شيئًا", h("input", { name: "arc", type: "number", min: "0", value: c.archive_new_days, class: "ltr" })),
         field("احذف الفرص المغلقة نهائيًا بعد (أيام، 0 = لا حذف). قائمة عدم التواصل لا تُحذف أبدًا", h("input", { name: "ret", type: "number", min: "0", value: c.retention_days, class: "ltr" })),
+        field("خانة مفتاح Claude لهذا المشروع (اسم فقط، مثل CALGYM؛ المفتاح نفسه يُضاف في أسرار الاستضافة)", h("input", { name: "slot", value: c.key_slot, class: "ltr", placeholder: "لم تُحدَّد" })),
         field("منطقة معالجة النموذج", h("select", { name: "geo" }, [["global", "عامة — السعر القياسي"], ["us", "الولايات المتحدة فقط — السعر ×1.1"]].map(([k, t]) => h("option", { value: k, selected: c.inference_geo === k }, t)))),
         h("button", {}, "احفظ الإعداد")),
       h("section", { class: "card" }, h("h2", {}, "المراجعات النظامية"),
@@ -344,7 +351,7 @@ async function viewConfig() {
           g ? h("button", { type: "button", class: "danger", onclick: () => save({ gates: { [k]: null } }) }, "أغلق البوابة")
             : [field("من راجع", h("input", { name: "r", required: true })), field("ما الذي روجع وما النتيجة", h("input", { name: "n", required: true })), h("button", { class: "ghost" }, "سجّل")]); })),
       h("section", { class: "card" }, h("h2", {}, "البيانات"),
-        h("div", { class: "row" }, h("a", { class: "btn ghost", href: `/api/p/${S.pid}/export.json`, download: `project-${S.pid}.json` }, "تصدير كامل JSON"),
+        h("div", { class: "row" }, h("a", { class: "btn ghost", href: `api/p/${S.pid}/export.json`, download: `project-${S.pid}.json` }, "تصدير كامل JSON"),
           h("button", { class: "ghost", onclick: async () => { try { const r = await api("POST", P("/archive-stale")); toast(`أُرشفت ${r.archived}`); } catch (e) { fail(e); } } }, "أرشف الجهات الراكدة الآن"),
           h("button", { class: "danger", onclick: async () => { if (!confirm("حذف الفرص المغلقة التي تجاوزت مدة الاحتفاظ؟")) return; try { const r = await api("POST", P("/purge")); toast(`حُذفت ${r.deleted}`); } catch (e) { fail(e); } } }, "نفّذ سياسة الحذف الآن"))));
   }
@@ -358,7 +365,38 @@ async function viewConfig() {
 async function viewSafety() {
   const [sup, log] = await Promise.all([api("GET", "/suppress"), api("GET", "/audit")]);
   const pname = (id) => (S.projects.find((p) => p.id === id) || {}).name || "";
+  const cl = await api("GET", "/claude/status");
+  const yes = (b) => h("span", { class: "pill " + (b ? "act" : "est") }, b ? "نعم" : "لا");
+  const show = (x) => { S.claudeOut = JSON.stringify(x, null, 2); render(); };
+  const run = (fn) => async () => { try { show(await fn()); } catch (e) { fail(e); S.claudeOut = e.message + (e.detail && e.detail.reasons ? "\n" + e.detail.reasons.join("\n") : ""); render(); } };
+  const lr = cl.last_result;
   return [
+    h("section", { class: "card" }, h("h2", {}, "Claude والتجربة المصطنعة"),
+      h("p", { class: "muted" }, "المفاتيح تُقرأ من أسرار الاستضافة ولا تظهر هنا. يُعرض وجودها فقط."),
+      h("ul", { class: "list" },
+        h("li", {}, "التشغيل المدفوع مفعّل: ", yes(cl.paid_enabled), " ",
+          h("button", { class: cl.paid_enabled ? "ghost" : "danger", onclick: async () => { if (!cl.paid_enabled && !confirm("تفعيل السماح بطلبات مدفوعة إلى Claude. الحدود والبوابات تبقى سارية. متابعة؟")) return; try { await api("POST", "/paid", { enabled: !cl.paid_enabled }); render(); } catch (e) { fail(e); } } }, cl.paid_enabled ? "أطفئه" : "فعّله")),
+        h("li", {}, "معرّف المنظمة المتوقع: ", h("span", { class: "ltr" }, cl.organization_id || "غير مضبوط")),
+        h("li", {}, "مفتاح التجربة المصطنعة موجود: ", yes(cl.synthetic.key_present)),
+        h("li", {}, "مساحة العمل المتوقعة: ", h("span", { class: "ltr" }, cl.synthetic.workspace_id || "غير مضبوطة")),
+        h("li", {}, "الدفعة المصطنعة نُفّذت: ", yes(cl.synthetic_ran), cl.synthetic_ran ? ` — فعلي $${cl.synthetic_ledger.totals.actual.toFixed(4)}، غير محسوم $${cl.synthetic_ledger.totals.unresolved.toFixed(4)}، من حد $${cl.synthetic_cap_usd}` : ""),
+        cl.project_slots.map((s) => h("li", {}, `${s.project} — خانة ${s.slot}: المفتاح `, yes(s.key_present), " المساحة ", h("span", { class: "ltr" }, s.workspace_id || "غير مضبوطة")))),
+      h("p", { class: "muted" }, "الدفعة المصطنعة طلبان فقط لمنشأة غير موجودة: المتوقع 0.02$ إلى 0.06$ والحجز نحو 0.08$. ليست سقفًا مضمونًا. تُنفَّذ مرة واحدة."),
+      h("div", { class: "row" },
+        h("button", { class: "ghost", onclick: run(() => api("POST", "/claude/synthetic/dry")) }, "تشغيل جاف (مجاني، وهمي)"),
+        h("button", { class: "ghost", onclick: run(() => api("POST", "/claude/synthetic/preflight")) }, "فحص الحساب (مجاني)"),
+        h("button", { disabled: cl.synthetic_ran, onclick: run(async () => { if (!confirm("سيُرسل طلبان مدفوعان إلى Claude بمحتوى مصطنع. متابعة؟")) throw new Error("أُلغي"); return api("POST", "/claude/synthetic/run", { confirm: true }); }) }, "شغّل الطلبين المصطنعين"),
+        h("button", { class: "ghost", onclick: run(() => api("GET", "/claude/recordings")) }, "اعرض الردود المسجَّلة")),
+      lr ? h("div", { class: "draft" }, h("b", {}, "آخر نتيجة للدفعة المصطنعة"),
+        h("ul", { class: "list" }, lr.calls.map((x) => h("li", {}, h("b", {}, x.kind === "extract" ? "استخراج" : "مسودة"), ` · ${x.model}`, h("br"),
+          x.error ? h("span", { class: "warn" }, String(x.error)) : h("span", { class: "ltr" }, `reserved $${x.reserved} · actual $${x.actual} · in ${x.usage.input_tokens} · out ${x.usage.output_tokens}`)))),
+        h("p", { class: "muted" }, "للمطابقة: قارن «actual» بصفحة Cost في Console لمساحة العمل نفسها.")) : null,
+      S.claudeOut ? field("المخرجات (انسخها عند الحاجة؛ لا مفاتيح فيها)", h("textarea", { readOnly: true, value: S.claudeOut, class: "ltr" })) : null),
+    h("form", { class: "card", onsubmit: async (e) => { e.preventDefault(); try { await api("POST", "/password", { old: e.target.elements.o.value, new: e.target.elements.n.value }); e.target.reset(); toast("تغيّرت كلمة المرور وأُخرجت الأجهزة الأخرى"); } catch (err) { fail(err); } } },
+      h("h2", {}, "كلمة المرور"),
+      field("الحالية", h("input", { name: "o", type: "password", required: true, autocomplete: "current-password", class: "ltr" })),
+      field("الجديدة (12 حرفًا على الأقل)", h("input", { name: "n", type: "password", required: true, minLength: 12, autocomplete: "new-password", class: "ltr" })),
+      h("button", { class: "ghost" }, "غيّرها")),
     h("section", { class: "card" }, h("h2", {}, "إيقاف الإجراءات المدفوعة"),
       h("p", { class: "muted" }, "يوقف كل استدعاء مدفوع في كل المشاريع فورًا."),
       h("button", { class: "danger", onclick: async () => { try { await api("POST", "/pause", { paused: true }); toast("أُوقفت. الاستئناف من تقرير المشروع."); } catch (e) { fail(e); } } }, "أوقف الآن")),
