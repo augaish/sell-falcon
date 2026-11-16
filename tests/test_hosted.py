@@ -254,3 +254,12 @@ def test_backup_download_is_owner_only_and_restorable(tmp_path):
     v.post("/api/login", json={"email": "v@x.test", "password": "pw-viewer-123456"})
     assert v.get("/api/backup").status_code == 403
     assert TestClient(A.app).get("/api/backup").status_code == 401
+
+
+def test_startup_fails_clearly_when_data_dir_is_not_writable(monkeypatch, tmp_path):
+    import server
+    assert server.check_data_dir() == str(tmp_path / "data")
+    monkeypatch.setattr(Path, "write_text", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError(13, "Permission denied")))
+    with pytest.raises(RuntimeError) as e:
+        server.check_data_dir()
+    assert "غير قابل للكتابة" in str(e.value) and "RAILWAY_RUN_UID" in str(e.value)

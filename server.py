@@ -15,7 +15,22 @@ import discovery  # noqa: F401
 import hosted  # noqa: F401
 
 
+def check_data_dir():
+    """يتأكد عند الإقلاع أن مجلد البيانات قابل للكتابة. قرص مركَّب بصلاحيات لا تسمح للمستخدم بالكتابة يوقف الإقلاع برسالة واضحة،
+    بدل أن يعمل التطبيق ثم تفشل أول عملية حفظ."""
+    d = A.data_dir()
+    probe = d / ".write-probe"
+    try:
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as e:
+        raise RuntimeError(f"مجلد البيانات {d} غير قابل للكتابة ({e.strerror}). تحقق من تركيب القرص الدائم وصلاحياته. "
+                           "على Railway مع صورة لا تعمل كجذر: أضف المتغير RAILWAY_RUN_UID=0") from e
+    return str(d)
+
+
 def build() -> FastAPI:
+    check_data_dir()
     A.bootstrap_owner()
     base = A.base_path()
     if not base:
