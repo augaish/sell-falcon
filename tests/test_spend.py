@@ -148,14 +148,18 @@ def test_interrupted_request_stays_unresolved_and_counts(c):
     assert row["state"] == "unresolved" and row["amount_usd"] == pytest.approx(0.096) and row["is_estimate"] == 1
     rep = c.get(f"/api/p/{a}/report").json()["costs"]
     assert rep["unresolved"] == pytest.approx(0.096) and rep["actual"] == 0
-    # الحجز غير المحسوم يُحتسب على الحد: 0.096 + 0.096 > 0.15
-    with pytest.raises(A.HTTPException) as e2:
-        call(a, prov)
-    assert e2.value.status_code == 402 and prov.calls == 1
+    # أي طلب جديد للمشروع موقوف حتى التسوية، ولو كان في الحد متسع
+    c.put(f"/api/p/{a}/config", json={"monthly_cap_usd": 100, "daily_cap_usd": 100})
+    for _ in range(3):
+        with pytest.raises(A.HTTPException) as e2:
+            call(a, prov)
+        assert e2.value.status_code == 409 and "غير محسوم" in e2.value.detail
+    assert prov.calls == 1 and len(rows(a)) == 1
+    assert c.get(f"/api/p/{a}/report").json()["costs"]["blocked_by_unresolved"] is True
     # التسوية من الفاتورة
     assert c.post(f"/api/p/{a}/costs/{row['id']}/resolve", json={"amount_usd": 0.02}).status_code == 200
     rep = c.get(f"/api/p/{a}/report").json()["costs"]
-    assert rep["unresolved"] == 0 and rep["actual"] == pytest.approx(0.02)
+    assert rep["unresolved"] == 0 and rep["actual"] == pytest.approx(0.02) and rep["blocked_by_unresolved"] is False
     call(a, prov)  # صار في الحد متسع
 
 
@@ -250,3 +254,130 @@ def test_phase0_db_is_migrated(c, tmp_path):
                       " INSERT INTO costs(ts,kind,amount_usd,is_estimate) VALUES('2026-11-01','llm',1,0);")
     con.commit(); con.close()
     assert rows(a)[0]["state"] == "settled"
+
+
+# ---------- إصلاحات المراجعة ----------
+WORKER = """
+import sys, time
+sys.path.insert(0, {root!r})
+import app as A, spend as S
+pid, start, n = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
+while time.time() < start:
+    pass
+ok, codes = 0, set()
+for _ in range(n):
+    try:
+        S.reserve(pid, 0.096, "llm", "mp"); ok += 1
+    except A.HTTPException as e:
+        codes.add(e.status_code)
+print(ok, sorted(codes))
+"""
+
+
+def run_workers(pid, procs, attempts, env_dir):
+    import os, subprocess, time
+    env = {**os.environ, "SELLFALCON_DATA": env_dir}
+    code = WORKER.format(root=str(Path(__file__).parent.parent))
+    start = time.time() + 2.5
+    ps = [subprocess.Popen([sys.executable, "-c", code, str(pid), str(start), str(attempts)], env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(procs)]
+    outs = [p.communicate(timeout=60) for p in ps]
+    assert all(p.returncode == 0 for p in ps), [o[1][-400:] for o in outs]
+    return [(int(o[0].split()[0]), o[0].split(maxsplit=1)[1].strip()) for o in outs]
+
+
+def test_multiprocess_reservations_are_atomic(c, tmp_path):
+    """8 عمليات مستقلة، كل منها تحاول 5 حجوزات في اللحظة نفسها، وحد يتسع لثلاثة فقط."""
+    a = proj(c, "A", cap=0.3, daily=1)
+    res = run_workers(a, procs=8, attempts=5, env_dir=str(tmp_path / "data"))
+    assert sum(ok for ok, _ in res) == 3
+    assert all(codes in ("[]", "[402]") for _, codes in res)
+    rs = rows(a)
+    assert len(rs) == 3 and sum(r["amount_usd"] for r in rs) == pytest.approx(0.288) and all(r["state"] == "reserved" for r in rs)
+
+
+def test_multiprocess_daily_cap_is_atomic(c, tmp_path):
+    a = proj(c, "A", cap=100, daily=0.5)      # اليومي يتسع لخمسة
+    res = run_workers(a, procs=6, attempts=4, env_dir=str(tmp_path / "data"))
+    assert sum(ok for ok, _ in res) == 5 and len(rows(a)) == 5
+
+
+def test_unresolved_blocks_new_process_after_restart(c, tmp_path):
+    a = proj(c, "A", cap=100, daily=100)
+    with pytest.raises(A.HTTPException):
+        call(a, MockProvider(script=[Unknown("timeout")]))
+    res = run_workers(a, procs=2, attempts=2, env_dir=str(tmp_path / "data"))      # عمليات جديدة = إعادة تشغيل
+    assert res == [(0, "[409]"), (0, "[409]")] and len(rows(a)) == 1
+
+
+def old_row(pid, ts, state, amount=0.096):
+    with A.pdb(pid) as p:
+        p.execute("INSERT INTO costs(ts,kind,amount_usd,is_estimate,note,state) VALUES(?,?,?,?,?,?)", (ts, "llm", amount, 1, "قديم", state))
+
+
+@pytest.mark.parametrize("ts", ["2026-10-31T23:59:00+00:00", "2025-12-31T23:59:00+00:00", "2020-01-01T00:00:00+00:00"])
+def test_unresolved_still_counts_and_blocks_after_day_and_month_change(c, ts):
+    a = proj(c, "A", cap=100, daily=100)
+    old_row(a, ts, "unresolved")
+    rep = c.get(f"/api/p/{a}/report").json()["costs"]
+    assert rep["unresolved"] == pytest.approx(0.096) and rep["estimate"] == pytest.approx(0.096)     # داخل حساب الشهر الحالي
+    assert rep["blocked_by_unresolved"] and rep["unresolved_items"][0]["ts"] == ts                   # ظاهر بتاريخه
+    with A.pdb(a) as p:
+        assert S.today_total(p) == pytest.approx(0.096)                                              # وداخل حساب اليوم
+    prov = MockProvider(default=U)
+    with pytest.raises(A.HTTPException) as e:
+        call(a, prov)
+    assert e.value.status_code == 409 and prov.calls == 0
+    rid = rep["unresolved_items"][0]["id"]
+    c.post(f"/api/p/{a}/costs/{rid}/resolve", json={"amount_usd": 0})
+    call(a, prov)
+
+
+def test_old_settled_costs_do_not_leak_into_this_month(c):
+    a = proj(c, "A", cap=1, daily=1)
+    with A.pdb(a) as p:
+        p.execute("INSERT INTO costs(ts,kind,amount_usd,is_estimate,note,state) VALUES('2026-01-05T00:00:00+00:00','llm',5,0,'','settled')")
+    rep = c.get(f"/api/p/{a}/report").json()["costs"]
+    assert rep["actual"] == 0 and not rep["blocked_by_unresolved"]
+    call(a, MockProvider(default=U))
+
+
+def test_stale_reservation_from_dead_process_becomes_unresolved(c):
+    """عملية ماتت بعد الحجز وقبل التسوية: الحجز القديم يصير غير محسوم ويوقف المشروع."""
+    a = proj(c, "A", cap=100, daily=100)
+    old_row(a, "2026-11-01T00:00:00+00:00", "reserved")
+    prov = MockProvider(default=U)
+    with pytest.raises(A.HTTPException) as e:
+        call(a, prov)
+    assert e.value.status_code == 409 and prov.calls == 0
+    assert rows(a)[0]["state"] == "unresolved" and "توقف العملية" in rows(a)[0]["note"]
+
+
+def test_fresh_reservation_of_running_request_does_not_block(c):
+    a = proj(c, "A", cap=100, daily=100)
+    old_row(a, A.now(), "reserved")           # طلب آخر جارٍ الآن
+    assert call(a, MockProvider(default=U))["cost"] > 0
+
+
+def test_unresolved_in_one_project_does_not_block_another(c):
+    a, b = proj(c, "A", cap=100, daily=100), proj(c, "B", cap=100, daily=100)
+    old_row(a, "2026-10-01T00:00:00+00:00", "unresolved")
+    assert call(b, MockProvider(default=U))["cost"] > 0
+
+
+def test_us_inference_geo_costs_ten_percent_more(c):
+    a = proj(c, "A")
+    assert S.worst_case(OPUS, 4000, 4000, geo="us") == pytest.approx(0.096 * 1.1)
+    assert S.worst_case(HAIKU, 1000, 2000, 1, geo="us") == pytest.approx(((2000 + 15000) * 0.10 + 2000 * 0.50) / 1e6 * 1.1 + 0.01)
+    assert c.put(f"/api/p/{a}/config", json={"inference_geo": "moon"}).status_code == 400
+    c.put(f"/api/p/{a}/config", json={"inference_geo": "us"})
+    seen = {}
+
+    class P(MockProvider):
+        def complete(self, **kw):
+            seen.update(kw)
+            return super().complete(**kw)
+    r = call(a, P(default=U))
+    assert seen["inference_geo"] == "us"
+    assert r["cost"] == pytest.approx(0.056 * 1.1) and r["reserved"] == pytest.approx(0.096 * 1.1)
+    assert c.get(f"/api/p/{a}/report").json()["costs"]["inference_geo"] == "us"

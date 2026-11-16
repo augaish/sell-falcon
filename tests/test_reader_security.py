@@ -50,10 +50,13 @@ def fetcher(handler):
     seen = []
 
     def wrapped(request):
-        seen.append(str(request.url))
+        seen.append(f"{request.url.scheme}://{request.headers['host']}{request.url.raw_path.decode()}")
+        targets.append(request.url.host)
+        snis.append(request.extensions.get("sni_hostname"))
         return handler(request)
+    targets, snis = [], []
     f = D.HttpFetcher(transport=httpx.MockTransport(wrapped))
-    f.seen = seen
+    f.seen, f.targets, f.snis = seen, targets, snis
     return f
 
 
@@ -113,17 +116,64 @@ def test_redirect_chain_is_limited():
 
 
 def test_redirect_to_public_subdomain_followed_and_reported():
-    f = fetcher(lambda r: html() if r.url.host == "cdn.site.example" else httpx.Response(301, headers={"location": "https://cdn.site.example/"}))
+    f = fetcher(lambda r: html() if r.headers["host"] == "cdn.site.example" else httpx.Response(301, headers={"location": "https://cdn.site.example/"}))
     assert f.fetch("https://site.example/")[1] == "https://cdn.site.example/"
 
 
 def test_reader_drops_page_redirected_to_another_domain(tmp_path, monkeypatch):
     """القارئ يرفض صفحة انتهت في نطاق غير نطاق الجهة، حتى لو كان عامًا."""
     monkeypatch.setattr(D, "FETCHER", fetcher(lambda r: httpx.Response(404) if r.url.path == "/robots.txt" else (
-        html("<p>evil</p>") if r.url.host == "other.example" else httpx.Response(302, headers={"location": "https://other.example/"}))))
+        html("<p>evil</p>") if r.headers["host"] == "other.example" else httpx.Response(302, headers={"location": "https://other.example/"}))))
     with pytest.raises(A.HTTPException) as e:
         D._get_page("https://site.example/", "site.example")
     assert e.value.status_code == 409 and "نطاق آخر" in e.value.detail
+
+
+# ---------- تغيير DNS بين الفحص والاتصال ----------
+def rebinding(monkeypatch, plan):
+    """حلّ أسماء يعيد عنوانًا مختلفًا في كل نداء: plan = {host: [ip أول نداء، ip ثاني نداء، ...]}."""
+    calls = {}
+
+    def resolve(host, *a, **k):
+        calls[host] = calls.get(host, 0) + 1
+        seq = plan[host]
+        ip = seq[min(calls[host], len(seq)) - 1]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))]
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return calls
+
+
+def test_dns_rebinding_connection_goes_to_validated_ip(monkeypatch):
+    calls = rebinding(monkeypatch, {"site.example": [PUBLIC, "127.0.0.1", "169.254.169.254"]})
+    f = fetcher(lambda r: html())
+    assert f.fetch("https://site.example/x?y=1") == (200, "https://site.example/x?y=1", "<p>ok</p>")
+    assert calls == {"site.example": 1}                 # حلّ واحد فقط: لا فرصة لتبديل العنوان
+    assert f.targets == [PUBLIC]                        # الاتصال بالعنوان الذي فُحص
+    assert f.seen == ["https://site.example/x?y=1"]     # ترويسة Host والمسار كما هما
+    assert f.snis == ["site.example"]                   # اسم TLS هو اسم الموقع
+
+
+def test_each_redirect_hop_resolved_once_and_pinned(monkeypatch):
+    calls = rebinding(monkeypatch, {"site.example": [PUBLIC, "10.0.0.8"], "cdn.site.example": ["93.184.216.35", "127.0.0.1"]})
+    f = fetcher(lambda r: html() if r.headers["host"] == "cdn.site.example" else httpx.Response(302, headers={"location": "https://cdn.site.example/a"}))
+    assert f.fetch("https://site.example/")[1] == "https://cdn.site.example/a"
+    assert calls == {"site.example": 1, "cdn.site.example": 1}
+    assert f.targets == [PUBLIC, "93.184.216.35"] and f.snis == ["site.example", "cdn.site.example"]
+
+
+def test_redirect_back_to_same_host_after_rebind_is_blocked(monkeypatch):
+    """الموقع يحوّل إلى نفسه بعد أن يتغير DNS إلى عنوان داخلي: القفزة الثانية تُحل من جديد وتُرفض."""
+    rebinding(monkeypatch, {"site.example": [PUBLIC, "127.0.0.1"]})
+    f = fetcher(lambda r: httpx.Response(302, headers={"location": "https://site.example/again"}))
+    refused(f, "https://site.example/")
+    assert f.targets == [PUBLIC]                        # الطلب الثاني لم يُرسل
+
+
+def test_ipv6_target_is_bracketed(monkeypatch):
+    rebinding(monkeypatch, {"site.example": ["2606:2800:220:1:248:1893:25c8:1946"]})
+    f = fetcher(lambda r: html())
+    f.fetch("https://site.example/")
+    assert f.targets == ["2606:2800:220:1:248:1893:25c8:1946"] and f.snis == ["site.example"]
 
 
 # ---------- حدود التنزيل ----------

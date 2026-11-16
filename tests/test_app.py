@@ -211,3 +211,45 @@ def test_backup_restore_roundtrip(c, tmp_path, monkeypatch):
     assert r.get("/api/suppress").json()[0]["value"] == "blocked.example"
     with pytest.raises(SystemExit):
         manage.restore(str(tmp_path / "b.tar.gz"), str(tmp_path / "restored"))
+
+
+def test_archive_is_restorable_and_keeps_dedupe_and_suppression(c):
+    a = proj(c, "A")
+    oid = mk(c, a).json()["id"]
+    c.post(f"/api/p/{a}/opps/{oid}/drafts", json={"lang": "ar"})
+    c.post("/api/suppress", json={"value": "keepme.example"})
+    assert c.post(f"/api/p/{a}/archive-stale").status_code == 400            # غير مفعّلة افتراضيًا
+    c.put(f"/api/p/{a}/config", json={"archive_new_days": 90})
+    assert c.post(f"/api/p/{a}/archive-stale").json() == {"archived": 0}     # جهة حديثة لا تؤرشف
+    with A.pdb(a) as p:
+        p.execute("UPDATE opps SET updated='2026-01-01T00:00:00+00:00'")
+    assert c.post(f"/api/p/{a}/archive-stale").json() == {"archived": 1}
+    o = c.get(f"/api/p/{a}/opps/{oid}").json()
+    assert o["archived_at"] and "الفرصة مؤرشفة" in o["send_blockers"]
+    assert len(o["contacts"]) == 1 and len(o["drafts"]) == 1 and len(o["sources"]) == 1   # لا شيء حُذف
+    assert mk(c, a).status_code == 409                                       # مفتاح منع التكرار باقٍ
+    assert c.get(f"/api/p/{a}/report").json()["archived"] == 1
+    assert [x["value"] for x in c.get("/api/suppress").json()] == ["keepme.example"]
+    r = c.post(f"/api/p/{a}/opps/{oid}/archive", json={"archived": False}).json()
+    assert r["archived_at"] is None and len(r["drafts"]) == 1
+    # غير «جديد» لا تؤرشف تلقائيًا
+    c.post(f"/api/p/{a}/opps/{oid}/status", json={"status": "review"})
+    with A.pdb(a) as p:
+        p.execute("UPDATE opps SET updated='2026-01-01T00:00:00+00:00'")
+    assert c.post(f"/api/p/{a}/archive-stale").json() == {"archived": 0}
+
+
+def test_purge_and_optout_never_shrink_suppression_list(c):
+    a = proj(c, "A")
+    oid = mk(c, a).json()["id"]
+    c.post(f"/api/p/{a}/opps/{oid}/optout", json={})
+    before = sorted(x["value"] for x in c.get("/api/suppress").json())
+    assert before == ["acme.example", "info@acme.example"]
+    c.put(f"/api/p/{a}/config", json={"retention_days": 1})
+    with A.pdb(a) as p:
+        p.execute("UPDATE opps SET updated='2020-01-01T00:00:00+00:00'")
+    assert c.post(f"/api/p/{a}/purge").json()["deleted"] == 1
+    assert sorted(x["value"] for x in c.get("/api/suppress").json()) == before
+    # الجهة حُذفت لكن إعادة إضافتها تبقى ممنوعة التواصل
+    o = c.get(f"/api/p/{a}/opps/{mk(c, a).json()['id']}").json()
+    assert o["suppressed"]

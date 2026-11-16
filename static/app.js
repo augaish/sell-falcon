@@ -98,11 +98,12 @@ function viewLogin() {
 // ---------- قائمة الفرص ----------
 async function viewList() {
   S.opps = await api("GET", P("/opps"));
-  const n = (st) => S.opps.filter((o) => o.status === st).length;
-  const shown = S.opps.filter((o) => S.filter === "all" || o.status === S.filter);
+  const live = S.opps.filter((o) => !o.archived_at), arch = S.opps.filter((o) => o.archived_at);
+  const n = (st) => live.filter((o) => o.status === st).length;
+  const shown = S.filter === "archived" ? arch : live.filter((o) => S.filter === "all" || o.status === S.filter);
   return [
     h("div", { class: "chips", role: "group", "aria-label": "تصفية حسب الحالة" },
-      [["all", `الكل ${S.opps.length}`], ...S.me.statuses.map((st) => [st, `${LABEL[st]} ${n(st)}`])].map(([k, t]) =>
+      [["all", `الكل ${live.length}`], ...S.me.statuses.map((st) => [st, `${LABEL[st]} ${n(st)}`]), ["archived", `الأرشيف ${arch.length}`]].map(([k, t]) =>
         h("button", { "aria-pressed": String(S.filter === k), onclick: () => { S.filter = k; render(); } }, t))),
     h("div", { class: "row" },
       h("button", { class: "grow", onclick: () => { S.adding = true; render(); } }, "إضافة فرصة"),
@@ -116,6 +117,7 @@ async function viewList() {
           h("span", { class: "name" }, o.name), h("br"),
           h("span", { class: "muted" }, [o.sector, o.country].filter(Boolean).join(" · ") || "—")),
         h("span", { class: "row" }, o.is_demo ? h("span", { class: "pill demo" }, "تجريبي") : null,
+          o.archived_at ? h("span", { class: "pill closed" }, "مؤرشفة") : null,
           h("span", { class: "pill" + (o.status === "closed" ? " closed" : "") }, LABEL[o.status])))))
       : h("div", { class: "empty" }, S.opps.length ? "لا توجد فرص بهذه الحالة." : "لا توجد فرص بعد. أضف فرصة أو استورد ملف CSV."),
   ];
@@ -243,6 +245,7 @@ async function viewOpp() {
       ["sent", "replied"].includes(o.status) ? h("form", { onsubmit: act((e) => api("POST", P(`/opps/${o.id}/log`), { kind: "reply", detail: val(e.target, "d") })) },
         field("ملخص الرد", h("input", { name: "d", required: true })), h("button", { class: "ghost" }, "سجّل ردًا")) : null,
       h("div", { class: "row" },
+        h("button", { class: "ghost", onclick: act(() => api("POST", P(`/opps/${o.id}/archive`), { archived: !o.archived_at })) }, o.archived_at ? "استعد من الأرشيف" : "أرشف"),
         h("button", { class: "danger", onclick: act(async () => { if (confirm("سيُمنع التواصل مع هذه الجهة في كل المشاريع. متابعة؟")) await api("POST", P(`/opps/${o.id}/optout`), {}); }) }, "طلبوا التوقف"),
         o.status !== "closed" ? h("button", { class: "danger", onclick: act(() => api("POST", P(`/opps/${o.id}/status`), { status: "closed", reason: "مرفوض" })) }, "ارفض وأغلق") : null,
         h("button", { class: "danger", onclick: act(async () => { if (confirm("حذف نهائي لهذه الفرصة وكل بياناتها؟")) { await api("DELETE", P(`/opps/${o.id}`)); S.oid = null; } }) }, "احذف نهائيًا"))),
@@ -277,8 +280,10 @@ async function viewReport() {
       c.warn80 && !c.paid_actions_blocked ? h("div", { class: "warn" }, "استُهلك 80% أو أكثر من الحد الشهري.") : null,
       c.paused ? h("div", { class: "warn" }, "الإجراءات المدفوعة موقوفة (إيقاف يدوي أو تلقائي). ",
         h("button", { class: "ghost", onclick: async () => { try { await api("PUT", P("/config"), { paid_paused: "0" }); await api("POST", "/pause", { paused: false }); render(); } catch (e) { fail(e); } } }, "استأنف")) : null,
-      c.unresolved ? h("div", { class: "warn" }, `تكلفة غير محسومة: $${c.unresolved.toFixed(2)}. طلب انقطع ولا نعرف هل حُسب؛ محجوزة كاملة حتى تسوّيها من فاتورة المزوّد.`) : null,
-      c.items.length ? h("ul", { class: "list" }, c.items.map((i) => h("li", {}, h("span", { class: "pill " + (i.is_estimate ? "est" : "act") }, i.state === "unresolved" ? "غير محسوم" : i.state === "reserved" ? "محجوز" : i.is_estimate ? "تقديري" : "فعلي"),
+      c.blocked_by_unresolved ? h("div", { class: "warn" }, h("b", {}, `طلبات غير محسومة: ${c.unresolved_items.length} — المحجوز لها $${c.unresolved.toFixed(2)}. `),
+        "كل طلب مدفوع جديد لهذا المشروع موقوف حتى تسوّيها من فاتورة المزوّد. تبقى محتسبة على الحد مهما مرّ من أيام أو أشهر.") : null,
+      h("p", { class: "muted" }, `منطقة المعالجة: ${c.inference_geo === "us" ? "الولايات المتحدة فقط (السعر ×1.1)" : "عامة (السعر القياسي)"}. الحجز تقدير لأسوأ احتمال وليس سقفًا مضمونًا.`),
+      c.items.length + c.unresolved_items.length ? h("ul", { class: "list" }, [...c.unresolved_items, ...c.items].map((i) => h("li", {}, h("span", { class: "pill " + (i.is_estimate ? "est" : "act") }, i.state === "unresolved" ? "غير محسوم" : i.state === "reserved" ? "محجوز" : i.is_estimate ? "تقديري" : "فعلي"),
         " ", h("b", { class: "ltr" }, `$${i.amount_usd.toFixed(2)}`), ` · ${COST_KIND[i.kind] || i.kind}`, i.note ? ` · ${i.note}` : "", h("br"), h("span", { class: "muted ltr" }, date(i.ts)),
         i.state === "unresolved" ? h("form", { onsubmit: async (e) => { e.preventDefault(); try { await api("POST", P(`/costs/${i.id}/resolve`), { amount_usd: Number(val(e.target, "a")) }); render(); } catch (err) { fail(err); } } },
           field("المبلغ الفعلي من فاتورة المزوّد (0 إن لم يُحسب)", h("input", { name: "a", type: "number", step: "0.0001", min: "0", required: true, class: "ltr" })),
@@ -308,7 +313,7 @@ async function viewConfig() {
     out.push(
       h("form", { class: "card", onsubmit: (e) => { e.preventDefault(); const f = e.target;
         save({ audience: val(f, "audience"), region: val(f, "region"), partnership: val(f, "partnership"), offer: val(f, "offer"), keywords: val(f, "keywords"),
-          monthly_cap_usd: val(f, "cap"), retention_days: val(f, "ret"), followup_days: val(f, "fu") }); } },
+          monthly_cap_usd: val(f, "cap"), retention_days: val(f, "ret"), followup_days: val(f, "fu"), archive_new_days: val(f, "arc"), inference_geo: val(f, "geo") }); } },
         h("h2", {}, "إعداد المشروع"),
         field("الجمهور المستهدف", h("textarea", { name: "audience", value: c.audience, rows: 2 })),
         h("div", { class: "two" }, field("المنطقة", h("input", { name: "region", value: c.region, placeholder: "لم تُحدَّد" })),
@@ -317,7 +322,9 @@ async function viewConfig() {
         field("معايير الملاءمة (كلمات مفصولة بفواصل)", h("input", { name: "keywords", value: c.keywords })),
         h("div", { class: "two" }, field("حد الإنفاق الشهري بالدولار", h("input", { name: "cap", type: "number", min: "0", step: "1", value: c.monthly_cap_usd, class: "ltr" })),
           field("اقترح متابعة بعد (أيام)", h("input", { name: "fu", type: "number", min: "1", value: c.followup_days, class: "ltr" }))),
-        field("احذف الفرص المغلقة بعد (أيام، 0 = لا حذف)", h("input", { name: "ret", type: "number", min: "0", value: c.retention_days, class: "ltr" })),
+        field("أرشف الجهات التي تبقى «جديد» بعد (أيام، 0 = لا أرشفة). الأرشفة قابلة للاستعادة ولا تحذف شيئًا", h("input", { name: "arc", type: "number", min: "0", value: c.archive_new_days, class: "ltr" })),
+        field("احذف الفرص المغلقة نهائيًا بعد (أيام، 0 = لا حذف). قائمة عدم التواصل لا تُحذف أبدًا", h("input", { name: "ret", type: "number", min: "0", value: c.retention_days, class: "ltr" })),
+        field("منطقة معالجة النموذج", h("select", { name: "geo" }, [["global", "عامة — السعر القياسي"], ["us", "الولايات المتحدة فقط — السعر ×1.1"]].map(([k, t]) => h("option", { value: k, selected: c.inference_geo === k }, t)))),
         h("button", {}, "احفظ الإعداد")),
       h("section", { class: "card" }, h("h2", {}, "المراجعات النظامية"),
         h("p", { class: "muted" }, "لا يُقبل تسجيل تواصل مع جهة في دولة لم تُسجَّل لها مراجعة هنا. سجّل ما راجعه مختص، لا افتراضًا."),
@@ -338,6 +345,7 @@ async function viewConfig() {
             : [field("من راجع", h("input", { name: "r", required: true })), field("ما الذي روجع وما النتيجة", h("input", { name: "n", required: true })), h("button", { class: "ghost" }, "سجّل")]); })),
       h("section", { class: "card" }, h("h2", {}, "البيانات"),
         h("div", { class: "row" }, h("a", { class: "btn ghost", href: `/api/p/${S.pid}/export.json`, download: `project-${S.pid}.json` }, "تصدير كامل JSON"),
+          h("button", { class: "ghost", onclick: async () => { try { const r = await api("POST", P("/archive-stale")); toast(`أُرشفت ${r.archived}`); } catch (e) { fail(e); } } }, "أرشف الجهات الراكدة الآن"),
           h("button", { class: "danger", onclick: async () => { if (!confirm("حذف الفرص المغلقة التي تجاوزت مدة الاحتفاظ؟")) return; try { const r = await api("POST", P("/purge")); toast(`حُذفت ${r.deleted}`); } catch (e) { fail(e); } } }, "نفّذ سياسة الحذف الآن"))));
   }
   out.push(h("form", { class: "card", onsubmit: async (e) => { e.preventDefault(); try { const p = await api("POST", "/projects", { name: val(e.target, "n") }); await loadProjects(); S.pid = p.id; localStorage.setItem("pid", p.id); render(); } catch (err) { fail(err); } } },

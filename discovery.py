@@ -21,7 +21,7 @@ import re
 import socket
 import time
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -66,8 +66,9 @@ _last: dict[str, float] = {}
 
 
 # ---------- الجلب ----------
-def check_public(url: str):
-    """يرفض غير http(s) وأي اسم يُحل إلى عنوان داخلي أو خاص."""
+def resolve_public(url: str) -> str:
+    """يتحقق من الرابط ويحلّ الاسم مرة واحدة ويعيد عنوان IP عامًّا. يرفض غير http(s)، المنافذ غير القياسية،
+    وأي اسم يُحل إلى عنوان داخلي أو خاص ولو كان أحد عناوينه فقط."""
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
         raise HTTPException(400, "رابط غير صالح")
@@ -78,16 +79,33 @@ def check_public(url: str):
     if port not in (None, 80, 443) or p.username or p.password:
         raise HTTPException(400, "منفذ غير قياسي أو بيانات دخول في الرابط")
     try:
-        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(p.hostname, port or (443 if p.scheme == "https" else 80), type=socket.SOCK_STREAM)
     except OSError:
         raise HTTPException(502, "تعذّر حل اسم النطاق")
-    for info in infos:
-        if not ipaddress.ip_address(info[4][0]).is_global:
-            raise HTTPException(400, "عنوان غير عام")
+    ips = [info[4][0] for info in infos]
+    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+        raise HTTPException(400, "عنوان غير عام")
+    return ips[0]
+
+
+def check_public(url: str):
+    resolve_public(url)
+
+
+def send_pinned(cl, url: str, ip: str):
+    """يتصل بعنوان IP الذي فُحص تحديدًا، لا بالاسم، حتى لا يغيّر DNS الوجهة بين الفحص والاتصال.
+    ترويسة Host واسم TLS (SNI والتحقق من الشهادة) يبقيان اسم الموقع."""
+    p = urlparse(url)
+    netloc = (f"[{ip}]" if ":" in ip else ip) + (f":{p.port}" if p.port else "")
+    target = urlunparse((p.scheme, netloc, p.path or "/", p.params, p.query, ""))
+    host = p.hostname + (f":{p.port}" if p.port else "")
+    req = cl.build_request("GET", target, headers={"Host": host}, extensions={"sni_hostname": p.hostname})
+    return cl.send(req, stream=True)
 
 
 class HttpFetcher:
-    """جلب بحدود: كل قفزة تحويل تُفحص، نص فقط، وحد أقصى للحجم والزمن. لا يستخدم وسيطًا من البيئة."""
+    """جلب بحدود: كل قفزة تحويل تُحل وتُفحص وتُثبَّت على عنوانها، نص فقط، وحد أقصى للحجم والزمن.
+    لا يستخدم وسيطًا من البيئة."""
 
     def __init__(self, transport=None):
         self.transport = transport
@@ -98,8 +116,8 @@ class HttpFetcher:
         with httpx.Client(transport=self.transport, headers={"User-Agent": UA}, timeout=REQUEST_TIMEOUT,
                           follow_redirects=False, trust_env=False) as cl:
             for _ in range(MAX_REDIRECTS + 1):
-                check_public(url)
-                with cl.stream("GET", url) as r:
+                r = send_pinned(cl, url, resolve_public(url))
+                try:
                     if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
                         url = urljoin(url, r.headers["location"])
                         continue
@@ -116,6 +134,8 @@ class HttpFetcher:
                         if time.monotonic() > deadline:
                             raise HTTPException(409, "تجاوز زمن التنزيل")
                     return r.status_code, url, buf.decode(r.encoding or "utf-8", "replace")
+                finally:
+                    r.close()
         raise HTTPException(409, "تحويلات كثيرة")
 
 
@@ -456,3 +476,6 @@ def api_osm_list(pid: int, u=Depends(A.auth)):
 @router.post("/api/p/{pid}/osm/{osm_type}/{osm_id}/promote")
 def api_osm_promote(pid: int, osm_type: str, osm_id: int, body: dict = Body(default={}), u=Depends(A.auth)):
     return {"id": promote_osm(pid, osm_type, osm_id, u["email"], bool(body.get("allow_cross")))}
+
+
+A.app.include_router(router)  # التسجيل هنا يعمل سواء استُورد app أولًا أو discovery أولًا

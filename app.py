@@ -52,7 +52,7 @@ PROJECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS opps(id INTEGER PRIMARY KEY, name TEXT NOT NULL, sector TEXT, fit_reason TEXT,
   country TEXT, website TEXT, status TEXT NOT NULL DEFAULT 'new', score INTEGER DEFAULT 0, score_why TEXT,
-  is_demo INTEGER DEFAULT 0, dedupe_key TEXT UNIQUE NOT NULL, basis TEXT, closed_reason TEXT, osm_ref TEXT, about TEXT,
+  is_demo INTEGER DEFAULT 0, dedupe_key TEXT UNIQUE NOT NULL, basis TEXT, closed_reason TEXT, osm_ref TEXT, about TEXT, archived_at TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contacts(id INTEGER PRIMARY KEY, opp_id INTEGER NOT NULL REFERENCES opps(id) ON DELETE CASCADE,
   kind TEXT NOT NULL, value TEXT NOT NULL, source_url TEXT NOT NULL, origin TEXT NOT NULL DEFAULT 'manual');
@@ -76,13 +76,14 @@ CREATE TRIGGER IF NOT EXISTS osm_readonly BEFORE UPDATE ON osm_records
   BEGIN SELECT RAISE(ABORT, 'osm_records read-only'); END;
 """
 MIGRATIONS = [("costs", "state", "TEXT NOT NULL DEFAULT 'settled'"), ("opps", "osm_ref", "TEXT"), ("opps", "about", "TEXT"),
-              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'")]
+              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'"), ("opps", "archived_at", "TEXT")]
 # بوابات يفتحها المالك بتسجيل من راجع وماذا راجع. بدونها لا يعمل الاكتشاف الآلي.
 GATES = {"data_assessment": "تقييم نظامية جمع البيانات ومعالجتها ونقلها",
          "osm_license": "مراجعة نص رخصة OpenStreetMap (ODbL)"}
 CONFIG_DEFAULTS = {
     "audience": "", "region": "", "partnership": "", "offer": "", "keywords": "",
     "monthly_cap_usd": "0", "daily_cap_usd": "", "paid_paused": "0", "retention_days": "0", "followup_days": "7",
+    "archive_new_days": "0", "inference_geo": "global",
     "compliance": "[]", "gates": "{}",
 }
 
@@ -98,7 +99,7 @@ def now() -> str:
 
 
 def _open(path: Path, schema: str) -> sqlite3.Connection:
-    c = sqlite3.connect(path)
+    c = sqlite3.connect(path, timeout=15)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     c.executescript(schema)
@@ -300,14 +301,13 @@ def score_opp(p, oid: int, cfg: dict):
 
 
 def month_costs(p) -> dict:
+    """فعلي وتقديري الشهر الحالي. غير المحسوم يدخل في التقديري أيًّا كان تاريخه، فلا يسقط بتغير الشهر."""
     start = now()[:7]
-    rows = p.execute("SELECT is_estimate, COALESCE(SUM(amount_usd),0) t FROM costs WHERE ts>=? GROUP BY is_estimate",
-                     (start,)).fetchall()
-    d = {0: 0.0, 1: 0.0}
-    d.update({r["is_estimate"]: r["t"] for r in rows})
-    unresolved = p.execute("SELECT COALESCE(SUM(amount_usd),0) FROM costs WHERE ts>=? AND state='unresolved'",
-                           (start,)).fetchone()[0]
-    return {"actual": round(d[0], 6), "estimate": round(d[1], 6), "unresolved": round(unresolved, 6)}
+    actual = p.execute("SELECT COALESCE(SUM(amount_usd),0) FROM costs WHERE is_estimate=0 AND ts>=?", (start,)).fetchone()[0]
+    est = p.execute("SELECT COALESCE(SUM(amount_usd),0) FROM costs WHERE is_estimate=1 AND state!='unresolved' AND ts>=?",
+                    (start,)).fetchone()[0]
+    unresolved = p.execute("SELECT COALESCE(SUM(amount_usd),0) FROM costs WHERE state='unresolved'").fetchone()[0]
+    return {"actual": round(actual, 6), "estimate": round(est + unresolved, 6), "unresolved": round(unresolved, 6)}
 
 
 def guard_spend(p, est_usd: float):
@@ -355,6 +355,8 @@ def draft_hash(subject: str, body: str, recipient: str) -> str:
 def send_blockers(p, o: dict) -> list[str]:
     """بوابة ما قبل التواصل. اعتماد الرسالة شرط واحد من عدة شروط، وليس كافيًا وحده."""
     out = []
+    if o.get("archived_at"):
+        out.append("الفرصة مؤرشفة")
     if o["status"] != "approved":
         out.append("الفرصة ليست في حالة «معتمد»")
     ok_draft = False
@@ -491,7 +493,10 @@ def config_put(pid: int, body: dict = Body(...), u=Depends(auth)):
                 v = "1" if v in (True, 1, "1") else "0"
             elif k == "daily_cap_usd" and s(v) == "":
                 v = ""
-            elif k in ("monthly_cap_usd", "daily_cap_usd", "retention_days", "followup_days"):
+            elif k == "inference_geo":
+                if v not in ("global", "us"):
+                    raise HTTPException(400, "منطقة المعالجة: global أو us")
+            elif k in ("monthly_cap_usd", "daily_cap_usd", "retention_days", "followup_days", "archive_new_days"):
                 try:
                     v = str(max(0, float(v))) if k.endswith("_usd") else str(max(0, int(v)))
                 except (TypeError, ValueError):
@@ -511,7 +516,7 @@ def config_put(pid: int, body: dict = Body(...), u=Depends(auth)):
 def opps(pid: int, u=Depends(auth)):
     with pdb(pid) as p:
         return [dict(r) for r in p.execute(
-            "SELECT id,name,sector,country,status,score,is_demo,updated FROM opps ORDER BY score DESC, id DESC")]
+            "SELECT id,name,sector,country,status,score,is_demo,updated,archived_at FROM opps ORDER BY score DESC, id DESC")]
 
 
 @app.post("/api/p/{pid}/opps")
@@ -551,6 +556,30 @@ def source_add(pid: int, oid: int, body: dict = Body(...), u=Depends(auth)):
     with pdb(pid) as p:
         opp_full(p, oid); add_source(p, oid, body); score_opp(p, oid, get_cfg(p))
         return opp_full(p, oid)
+
+
+@app.post("/api/p/{pid}/opps/{oid}/archive")
+def opp_archive(pid: int, oid: int, body: dict = Body(...), u=Depends(auth)):
+    """أرشفة قابلة للاستعادة: لا يُحذف شيء، ومفتاح منع التكرار يبقى."""
+    with pdb(pid) as p:
+        opp_full(p, oid)
+        p.execute("UPDATE opps SET archived_at=? WHERE id=?", (now() if body.get("archived") else None, oid))
+        audit(u["email"], pid, "opp.archive" if body.get("archived") else "opp.restore", f"#{oid}")
+        return opp_full(p, oid)
+
+
+@app.post("/api/p/{pid}/archive-stale")
+def archive_stale(pid: int, u=Depends(auth)):
+    """يؤرشف الجهات التي بقيت «جديد» دون تغيير مدة archive_new_days. لا يحذف، ولا يمس قائمة عدم التواصل."""
+    with pdb(pid) as p:
+        days = int(get_cfg(p)["archive_new_days"] or 0)
+        if not days:
+            raise HTTPException(400, "الأرشفة التلقائية غير مفعّلة لهذا المشروع")
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        n = p.execute("UPDATE opps SET archived_at=? WHERE status='new' AND archived_at IS NULL AND updated<?",
+                      (now(), cutoff)).rowcount
+    audit(u["email"], pid, "archive.stale", f"{n}")
+    return {"archived": n}
 
 
 ALLOWED_MOVES = {("new", "review"), ("review", "new"), ("review", "approved"), ("approved", "review"),
@@ -801,7 +830,13 @@ def report(pid: int, u=Depends(auth)):
             "costs": {**m, "cap": cap, "paid_actions_blocked": m["actual"] + m["estimate"] >= cap,
                       "warn80": cap > 0 and m["actual"] + m["estimate"] >= 0.8 * cap,
                       "paused": cfg["paid_paused"] == "1" or pause_get(u)["paused"],
-                      "items": [dict(r) for r in p.execute("SELECT * FROM costs ORDER BY id DESC LIMIT 20")]},
+                      "unresolved_items": [dict(r) for r in p.execute("SELECT * FROM costs WHERE state='unresolved' ORDER BY id")],
+                      "blocked_by_unresolved": m["unresolved"] > 0 or bool(
+                          p.execute("SELECT 1 FROM costs WHERE state='unresolved'").fetchone()),
+                      "inference_geo": cfg["inference_geo"],
+                      "items": [dict(r) for r in p.execute(
+                          "SELECT * FROM costs WHERE state!='unresolved' ORDER BY id DESC LIMIT 20")]},
+            "archived": p.execute("SELECT COUNT(*) FROM opps WHERE archived_at IS NOT NULL").fetchone()[0],
             "followups": fu,
         }
 
@@ -894,9 +929,8 @@ def audit_list(u=Depends(auth)):
         return [dict(r) for r in c.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 100")]
 
 
-import discovery  # noqa: E402  (في آخر الملف: يعتمد على كل ما سبق)
+import discovery  # noqa: E402,F401  (في آخر الملف: discovery يسجّل مساراته بنفسه أيًّا كان ترتيب الاستيراد)
 
-app.include_router(discovery.router)
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
