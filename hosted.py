@@ -156,6 +156,86 @@ def api_draft_llm(pid: int, oid: int, body: dict = Body(default={}), u=Depends(A
     return D.draft_llm(pid, oid, _project_provider(pid), lang="en" if body.get("lang") == "en" else "ar", user=u["email"])
 
 
+STARTED_AT = A.now()  # وقت إقلاع هذه العملية
+
+
+@router.get("/api/selfcheck")
+def selfcheck(request: A.Request, u=Depends(A.auth)):
+    """فحوص ما بعد الدخول من جلسة المالك نفسه. للقراءة فقط: لا تغيّر شيئًا، ولا تعرض أسرارًا، ولا تتصل بـClaude."""
+    if u["role"] != "owner":
+        raise HTTPException(403, "للمالك فقط")
+    out = []
+
+    def add(label, ok, detail=""):
+        out.append({"label": label, "ok": ok, "detail": detail})  # ok: True ناجح، False فاشل، None معلومة
+
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    add("الاتصال عبر HTTPS", proto == "https", proto)
+    secure = os.environ.get("SELLFALCON_SECURE") == "1"
+    add("ملف الجلسة Secure وترويسة HSTS مفعّلان", secure, "SELLFALCON_SECURE=1" if secure else "SELLFALCON_SECURE غير مضبوط")
+    add("ملف الجلسة باسم التطبيق ومحصور بمساره", A.COOKIE in request.cookies, f"{A.COOKIE} · Path={A.base_path() or '/'} · HttpOnly · SameSite=Strict")
+
+    d = A.data_dir()
+    add("مجلد البيانات على قرص مركَّب", os.path.ismount(d), str(d))
+    try:
+        probe = d / ".write-probe"
+        probe.write_text("ok")
+        probe.unlink()
+        add("مجلد البيانات قابل للكتابة", True)
+    except OSError as e:
+        add("مجلد البيانات قابل للكتابة", False, e.strerror or "")
+    with A.core() as c:
+        oldest = c.execute("SELECT MIN(ts) m FROM audit").fetchone()["m"]
+        users = [dict(r) for r in c.execute("SELECT role, COUNT(*) n FROM users GROUP BY role")]
+        projects = [dict(r) for r in c.execute("SELECT id, name FROM projects ORDER BY id")]
+    if oldest and oldest < STARTED_AT:
+        add("البيانات نجت من إعادة تشغيل", True, f"أقدم قيد نشاط {oldest}، وهذه العملية أقلعت {STARTED_AT}")
+    else:
+        add("البيانات نجت من إعادة تشغيل", None, "لا قيد أقدم من إقلاع هذه العملية بعد؛ أعد الفحص بعد أي نشر لاحق")
+    add("الحسابات", None, "، ".join(f"{x['role']}: {x['n']}" for x in users))
+    add("متغير كلمة مرور أول دخول محذوف", not os.environ.get("SELLFALCON_OWNER_PASSWORD"),
+        "" if not os.environ.get("SELLFALCON_OWNER_PASSWORD") else "ما زال موجودًا في الاستضافة: غيّر كلمة المرور من هنا ثم احذفه")
+
+    add("التشغيل المدفوع مطفأ", _setting("paid_enabled") != "1")
+    led = synthetic_ledger()
+    add("الدفعة المصطنعة لم تُنفَّذ", not led["rows"])
+    syn = slot_status(SYNTHETIC_SLOT)
+    add("مفاتيح Claude غير مضافة", not syn["key_present"], "مفتاح التجربة المصطنعة موجود" if syn["key_present"] else "")
+    for pr in projects:
+        with A.pdb(pr["id"]) as p:
+            cfg = A.get_cfg(p)
+            m = A.month_costs(p)
+            sent = p.execute("SELECT COUNT(*) FROM events WHERE kind='sent'").fetchone()[0]
+            pages = p.execute("SELECT COUNT(*) FROM site_pages").fetchone()[0]
+            osm = p.execute("SELECT COUNT(*) FROM osm_records").fetchone()[0]
+        n = pr["name"]
+        add(f"بوابات جمع البيانات مغلقة — {n}", json.loads(cfg["gates"] or "{}") == {})
+        add(f"لا مراجعة نظامية مسجلة، فالتواصل مغلق — {n}", json.loads(cfg["compliance"] or "[]") == [])
+        add(f"لا صفحات مواقع مقروءة ولا بيانات OSM — {n}", pages == 0 and osm == 0, f"صفحات {pages}، OSM {osm}")
+        add(f"لا إرسال مسجل — {n}", sent == 0)
+        add(f"لا تكلفة فعلية ولا غير محسومة — {n}", m["actual"] == 0 and m["unresolved"] == 0)
+    if not projects:
+        add("المشاريع", None, "لا مشاريع بعد")
+
+    import tempfile
+
+    import manage
+    fd, path = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    try:
+        manage.backup(path)
+        size = os.path.getsize(path)
+        add("إنشاء نسخة احتياطية يعمل", size > 200, f"{size} بايت")
+    except Exception as e:
+        add("إنشاء نسخة احتياطية يعمل", False, type(e).__name__)
+    finally:
+        os.unlink(path)
+    failed = [x["label"] for x in out if x["ok"] is False]
+    A.audit(u["email"], None, "selfcheck", f"فشل {len(failed)}")
+    return {"checked_at": A.now(), "started_at": STARTED_AT, "commit": (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "")[:12] or None,
+            "region": os.environ.get("RAILWAY_REPLICA_REGION") or None, "passed": not failed, "failed": failed, "checks": out}
+
+
 @router.get("/api/backup")
 def backup_download(u=Depends(A.auth)):
     """نسخة احتياطية متسقة لكل البيانات، للتنزيل خارج قرص الاستضافة. للمالك فقط: فيها كل بيانات النظام."""

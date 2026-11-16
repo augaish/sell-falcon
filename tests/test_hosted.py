@@ -263,3 +263,34 @@ def test_startup_fails_clearly_when_data_dir_is_not_writable(monkeypatch, tmp_pa
     with pytest.raises(RuntimeError) as e:
         server.check_data_dir()
     assert "غير قابل للكتابة" in str(e.value) and "RAILWAY_RUN_UID" in str(e.value)
+
+
+def test_selfcheck_reports_closed_state_without_secrets(monkeypatch):
+    cl = login(TestClient(A.app))
+    monkeypatch.setenv("SELLFALCON_OWNER_PASSWORD", "still-set-passphrase")
+    pid = cl.post("/api/projects", json={"name": "P"}).json()["id"]
+    r = cl.get("/api/selfcheck")
+    raw, s = r.text, r.json()
+    by = {x["label"]: x for x in s["checks"]}
+    assert "still-set-passphrase" not in raw and "pw-owner" not in raw
+    assert by["التشغيل المدفوع مطفأ"]["ok"] and by["الدفعة المصطنعة لم تُنفَّذ"]["ok"] and by["مفاتيح Claude غير مضافة"]["ok"]
+    assert by["بوابات جمع البيانات مغلقة — P"]["ok"] and by["لا إرسال مسجل — P"]["ok"] and by["لا تكلفة فعلية ولا غير محسومة — P"]["ok"]
+    assert by["مجلد البيانات قابل للكتابة"]["ok"] and by["إنشاء نسخة احتياطية يعمل"]["ok"]
+    assert by["متغير كلمة مرور أول دخول محذوف"]["ok"] is False                 # ما زال مضبوطًا
+    assert by["الاتصال عبر HTTPS"]["ok"] is False and s["passed"] is False      # الاختبار على http
+    # فتح بوابة وتفعيل المدفوع يظهران في الفحص
+    cl.put(f"/api/p/{pid}/config", json={"gates": {"data_assessment": {"reviewer": "م", "notes": "ر"}}})
+    cl.post("/api/paid", json={"enabled": True})
+    by = {x["label"]: x for x in cl.get("/api/selfcheck").json()["checks"]}
+    assert by["بوابات جمع البيانات مغلقة — P"]["ok"] is False and by["التشغيل المدفوع مطفأ"]["ok"] is False
+    assert TestClient(A.app).get("/api/selfcheck").status_code == 401
+
+
+def test_selfcheck_detects_data_surviving_a_restart(monkeypatch):
+    cl = login(TestClient(A.app))
+    by = lambda: {x["label"]: x for x in cl.get("/api/selfcheck", headers={"x-forwarded-proto": "https"}).json()["checks"]}  # noqa: E731
+    monkeypatch.setattr(HS, "STARTED_AT", "2020-01-01T00:00:00+00:00")
+    assert by()["البيانات نجت من إعادة تشغيل"]["ok"] is None               # لا قيد أقدم من الإقلاع
+    monkeypatch.setattr(HS, "STARTED_AT", "2999-01-01T00:00:00+00:00")
+    b = by()
+    assert b["البيانات نجت من إعادة تشغيل"]["ok"] is True and b["الاتصال عبر HTTPS"]["ok"] is True
