@@ -14,7 +14,7 @@ a { color: var(--brand-2); overflow-wrap: anywhere; }
 
 header.top { position: sticky; top: 0; z-index: 5; background: var(--brand); color: #fff;
   padding: 10px 16px; display: flex; gap: 10px; align-items: center; }
-header.top .brand { font-weight: 800; font-size: 1.25rem; letter-spacing: 0; }
+header.top .brand { font-weight: 800; font-size: 1.25rem; letter-spacing: 0; flex: none; white-space: nowrap; }
 header.top select { flex: 1; min-width: 0; background: #ffffff1f; color: #fff; border: 1px solid #ffffff55; }
 header.top select option { color: var(--ink); }
 header.top button { background: none; color: #fff; border: 1px solid #ffffff55; padding: 8px 10px; }

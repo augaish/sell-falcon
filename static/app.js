@@ -68,13 +68,13 @@ async function render() {
       h("select", { "aria-label": "المشروع", onchange: (e) => { S.pid = Number(e.target.value); localStorage.setItem("pid", S.pid); S.oid = null; S.adding = false; render(); } },
         S.projects.map((p) => h("option", { value: p.id, selected: p.id === S.pid }, p.name))),
       h("button", { onclick: async () => { await api("POST", "/logout"); S.me = null; render(); } }, "خروج")),
-    hasDemo && h("div", { class: "demo-banner" }, "هذا المشروع يحتوي بيانات تجريبية مختلقة موسومة «تجريبي» — ليست جهات حقيقية"),
+    hasDemo ? h("div", { class: "demo-banner" }, "هذا المشروع يحتوي بيانات تجريبية مختلقة موسومة «تجريبي» — ليست جهات حقيقية") : "",
   );
   const main = h("main", {});
   $app.append(main, h("nav", { class: "tabs", "aria-label": "الأقسام" },
     [["opps", "الفرص"], ["report", "التقرير"], ["config", "الإعداد"], ["safety", "الأمان"]].map(([k, t]) =>
       h("button", { "aria-current": S.tab === k ? "page" : null, onclick: () => { S.tab = k; S.oid = null; S.adding = false; render(); } }, t))));
-  if (!S.pid && S.tab !== "config") { main.append(h("div", { class: "empty" }, "لا توجد مشاريع بعد. أنشئ مشروعًا من «الإعداد».")); return; }
+  if (!S.pid && S.tab !== "config" && S.tab !== "safety") { main.append(h("div", { class: "empty" }, "لا توجد مشاريع بعد. أنشئ مشروعًا من «الإعداد».")); return; }
   try {
     if (S.tab === "opps") main.append(...(S.oid ? await viewOpp() : S.adding ? [viewAdd()] : await viewList()));
     if (S.tab === "report") main.append(...await viewReport());
