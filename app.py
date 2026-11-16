@@ -76,7 +76,8 @@ CREATE TRIGGER IF NOT EXISTS osm_readonly BEFORE UPDATE ON osm_records
   BEGIN SELECT RAISE(ABORT, 'osm_records read-only'); END;
 """
 MIGRATIONS = [("costs", "state", "TEXT NOT NULL DEFAULT 'settled'"), ("opps", "osm_ref", "TEXT"), ("opps", "about", "TEXT"),
-              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'"), ("opps", "archived_at", "TEXT"), ("costs", "provider", "TEXT")]
+              ("contacts", "origin", "TEXT NOT NULL DEFAULT 'manual'"), ("opps", "archived_at", "TEXT"), ("costs", "provider", "TEXT"),
+              ("sites", "terms_text", "TEXT"), ("sites", "terms_note", "TEXT")]
 # بوابات يفتحها المالك بتسجيل من راجع وماذا راجع. بدونها لا يعمل الاكتشاف الآلي.
 GATES = {"data_assessment": "تقييم نظامية جمع البيانات ومعالجتها ونقلها",
          "osm_license": "مراجعة نص رخصة OpenStreetMap (ODbL)"}
@@ -198,7 +199,20 @@ def bootstrap_projects() -> list[str]:
     return [n for _, n, _ in ids]
 
 
+# وصول مؤقت لمساعد التشغيل عبر رمز في أسرار الاستضافة (SELLFALCON_AGENT_TOKEN). يُحذف المتغير بعد انتهاء المهمة.
+# لا يملك: كلمة المرور، النسخ الاحتياطي، اعتماد المسودات، أساس التواصل، تسجيل إرسال أو رد، المراجعة النظامية، الحذف بالاحتفاظ.
+AGENT_FORBIDDEN = re.compile(r"/api/(password|backup)$|/(log|optout|basis|decision|purge)$")
+
+
 def auth(request: Request) -> dict:
+    bearer = request.headers.get("authorization", "")
+    if bearer.startswith("Bearer "):
+        tok = os.environ.get("SELLFALCON_AGENT_TOKEN", "")
+        if len(tok) < 32 or not hmac.compare_digest(bearer[7:].encode(), tok.encode()):
+            raise HTTPException(401, "رمز غير صالح")
+        if AGENT_FORBIDDEN.search(request.url.path):
+            raise HTTPException(403, "هذا الإجراء للمالك وحده")
+        return {"email": "agent", "role": "owner", "agent": True}
     sid = request.cookies.get(COOKIE)
     if not sid:
         raise HTTPException(401, "سجّل الدخول")
@@ -547,6 +561,8 @@ def config_put(pid: int, body: dict = Body(...), u=Depends(auth)):
             if k not in body:
                 continue
             v = body[k]
+            if k == "compliance" and u.get("agent"):
+                raise HTTPException(403, "المراجعة النظامية يسجّلها المالك وحده")
             if k == "compliance":
                 v = json.dumps([{"country": s(r.get("country"), 100), "notes": s(r.get("notes")),
                                  "reviewed_at": s(r.get("reviewed_at"), 10) or now()[:10]}

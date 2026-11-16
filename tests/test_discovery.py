@@ -97,9 +97,9 @@ def test_stored_text_is_redacted(c, monkeypatch, tmp_path):
     pid, oid, _ = setup(c, monkeypatch)
     c.post(f"/api/p/{pid}/opps/{oid}/read-site")
     dump = "\n".join(sqlite3.connect(tmp_path / "data/projects" / f"{pid}.db").iterdump())
-    assert "ahmed.almithal" not in dump and "0551234567" not in dump and "tracker@" not in dump
-    assert "[بريد محذوف]" in dump and "[رقم محذوف]" in dump
-    assert "أحمد المثال" in dump  # خطر متبقٍّ موثق: الأسماء داخل النص لا تُحذف آليًا
+    assert "ahmed.almithal" not in dump and "0551234567" not in dump and "tracker@" not in dump          # العنوان العام info@ يبقى كجهة تواصل مرشحة
+    assert "نادٍ رياضي بثلاثة فروع" in dump                 # ما تقوله المنشأة عن نفسها يبقى
+    assert "أحمد المثال" not in dump and "المدير" not in dump  # الجملة التي تذكر شخصًا بصفته حُذفت كلها
 
 
 def test_after_terms_allowed_only_generic_contacts_added(c, monkeypatch):
@@ -239,27 +239,32 @@ def test_extract_sends_redacted_text_and_records_cost(c, monkeypatch):
     c.post(f"/api/p/{pid}/opps/{oid}/read-site")
     prov = MockProvider(default={"text": json.dumps({"sector": "نادي رياضي", "about": "نادٍ بثلاثة فروع. راسل x@y.example"}),
                                  "usage": {"input_tokens": 3000, "output_tokens": 300}})
+    c.put(f"/api/p/{pid}/config", json={"audience": "أندية ومدربون"})
     o = D.extract(pid, oid, prov)
     sent = prov.prompts[0]
     assert "@" not in sent and "0551234567" not in sent and "+966" not in sent
-    assert o["sector"] == "نادي رياضي" and "@" not in o["about"]
+    assert "أحمد" not in sent and "راسلونا" not in sent and "تأسس النادي" not in sent     # لا أشخاص، ولا صفحتا «تواصل» و«من نحن»
+    assert "أندية ومدربون" in sent and len(sent) < 2500                                # الجمهور للملاءمة، ومقتطف قصير فقط
+    assert o["sector"] == "نادي رياضي" and "@" not in o["about"] and o["fit_reason"] == ""
     rep = c.get(f"/api/p/{pid}/report").json()["costs"]
     assert rep["actual"] == pytest.approx(3000 * 0.10 / 1e6 + 300 * 0.50 / 1e6) and rep["estimate"] == 0
 
 
-def test_draft_llm_needs_offer_then_waits_for_review(c, monkeypatch):
+def test_draft_llm_without_offer_is_intro_only_and_waits_for_review(c, monkeypatch):
     pid, oid = ready(c, monkeypatch)
-    prov = MockProvider(default={"text": json.dumps({"subject": "تعاون", "body": "نص المسودة"}),
+    c.put(f"/api/p/{pid}/config", json={"audience": "أندية ومدربون"})
+    prov = MockProvider(default={"text": json.dumps({"subject": "تعارف", "body": "نص تعريفي"}),
                                  "usage": {"input_tokens": 800, "output_tokens": 900}})
-    with pytest.raises(A.HTTPException) as e:
-        D.draft_llm(pid, oid, prov)
-    assert e.value.status_code == 409 and prov.calls == 0            # لا دفع لمسودة لا يمكن اعتمادها
+    o = D.draft_llm(pid, oid, prov)
+    d = o["drafts"][-1]
+    assert d["status"] == "draft" and any("تعريفية فقط" in g for g in d["gaps"]) and o["send_blockers"]
+    assert "لا تصف منتجًا" in prov.prompts[0] and "أندية ومدربون" in prov.prompts[0] and "@" not in prov.prompts[0]
+    # مع عرض مكتوب: يُستخدم كما كتبه المالك، ولا يُرسل وصف الجمهور بديلًا عنه
     c.put(f"/api/p/{pid}/config", json={"offer": "عرض تجريبي للتواصل contact@me.example"})
     o = D.draft_llm(pid, oid, prov)
     d = o["drafts"][-1]
-    assert d["status"] == "draft" and d["generator"] == "llm:claude-opus-5-5" and any("نموذج لغوي" in g for g in d["gaps"])
-    assert "@" not in prov.prompts[0]
-    assert o["send_blockers"]                                         # المسودة لا تفتح بوابة التواصل
+    assert d["generator"] == "llm:claude-opus-5-5" and not any("تعريفية فقط" in g for g in d["gaps"])
+    assert "لا تصف منتجًا" not in prov.prompts[1] and "@" not in prov.prompts[1]
     assert o["cost"] == pytest.approx(800 * 4 / 1e6 + 900 * 20 / 1e6)
 
 
@@ -281,3 +286,36 @@ def test_model_pipeline_respects_project_cap(c, monkeypatch):
     with pytest.raises(A.HTTPException) as e:
         D.draft_llm(pid, oid, prov)
     assert e.value.status_code == 402 and prov.calls == 0
+
+
+def test_fit_from_model_is_labelled_and_never_overwrites_owner(c, monkeypatch):
+    pid, oid = ready(c, monkeypatch)
+    c.post(f"/api/p/{pid}/sites/terms", json={"domain": "gym.example", "decision": "allowed", "note": "لا رابط شروط"})
+    prov = MockProvider(default={"text": json.dumps({"sector": "نادي", "about": "نادٍ", "fit": "يذكر الموقع أنه نادٍ رياضي. راسل x@y.example"}),
+                                 "usage": {"input_tokens": 10, "output_tokens": 10}})
+    o = D.extract(pid, oid, prov)
+    assert o["fit_reason"].startswith("آلي — راجعه: يذكر الموقع أنه نادٍ رياضي") and "@" not in o["fit_reason"]
+    with A.pdb(pid) as p:
+        p.execute("UPDATE opps SET fit_reason='سبب كتبه المالك' WHERE id=?", (oid,))
+    assert D.extract(pid, oid, prov)["fit_reason"] == "سبب كتبه المالك"
+
+
+def test_person_sentences_dropped_and_emails_never_split(monkeypatch):
+    b = D.brief("شركة المثال | الرئيسية", "حلول لوجستية للشركات. راسلنا info@site.example",
+                "نخدم 40 مدينة. المدير العام خالد المثال يرحب بكم. Founder & CEO: Sara Example. نعمل منذ 2010. هاتف 0551234567")
+    assert "@" not in b and "info" not in b and "0551234567" not in b
+    assert "خالد" not in b and "Sara" not in b and "CEO" not in b
+    assert "حلول لوجستية للشركات" in b and "نخدم 40 مدينة" in b and "نعمل منذ 2010" in b and len(b) <= D.MAX_TEXT_CHARS
+
+
+def test_homepage_only_promotion_and_terms_page_review(c, monkeypatch):
+    pid, oid, f = setup(c, monkeypatch, pages={SITE: HOME, SITE + "/terms": "<p>يُمنع الاستخدام الآلي للموقع. للاستفسار legal@gym.example</p>",
+                                               SITE + "/contact": CONTACT, SITE + "/about": ABOUT})
+    c.post(f"/api/p/{pid}/opps/{oid}/read-site")
+    t = c.post(f"/api/p/{pid}/opps/{oid}/read-terms").json()
+    assert t["terms_url"] == SITE + "/terms" and "يُمنع الاستخدام الآلي" in t["terms_text"] and "@" not in t["terms_text"]
+    c.post(f"/api/p/{pid}/sites/terms", json={"domain": "gym.example", "decision": "allowed", "note": "قرأت الشروط"})
+    o = c.post(f"/api/p/{pid}/opps/{oid}/read-site", json={"more": False}).json()
+    assert {x["value"] for x in o["contacts"]} == {SITE + "/contact", "info@gym.example"}        # من الصفحة الرئيسية وحدها
+    assert not any(u.endswith(("/contact", "/about")) for u in f.log)                             # لا صفحات إضافية
+    assert "قرأت الشروط" in o["site"]["terms_note"] and o["site"]["terms_text"]

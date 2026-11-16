@@ -314,3 +314,30 @@ def test_initial_projects_seeded_once_and_invent_nothing(monkeypatch):
     assert by["بوابات جمع البيانات مغلقة — Calgym"]["ok"] and by["لا إرسال مسجل — Oshhh.fun"]["ok"]
     cl.put(f"/api/p/{ps[0]['id']}/config", json={"audience": "تعديل المالك"})
     assert A.bootstrap_projects() == [] and cl.get(f"/api/p/{ps[0]['id']}/config").json()["audience"] == "تعديل المالك"
+
+
+# ---------- رمز مساعد التشغيل ----------
+AGENT = "agent-token-0123456789abcdef0123456789abcdef"
+
+
+def test_agent_token_access_and_limits(monkeypatch):
+    cl = TestClient(A.app)
+    assert cl.get("/api/projects", headers={"Authorization": f"Bearer {AGENT}"}).status_code == 401      # لا متغير: لا وصول
+    monkeypatch.setenv("SELLFALCON_AGENT_TOKEN", "short")
+    assert cl.get("/api/projects", headers={"Authorization": "Bearer short"}).status_code == 401          # رمز قصير مرفوض
+    monkeypatch.setenv("SELLFALCON_AGENT_TOKEN", AGENT)
+    assert cl.get("/api/projects", headers={"Authorization": "Bearer wrong-" + AGENT}).status_code == 401
+    h = {"Authorization": f"Bearer {AGENT}"}
+    pid = cl.post("/api/projects", json={"name": "P"}, headers=h).json()["id"]
+    oid = cl.post(f"/api/p/{pid}/opps", json={"name": "جهة"}, headers=h).json()["id"]
+    assert cl.get("/api/me", headers=h).json()["agent"] is True
+    did = cl.post(f"/api/p/{pid}/opps/{oid}/drafts", json={"lang": "ar"}, headers=h).json()["drafts"][0]["id"]
+    for method, path, body in (("post", "/api/password", {"old": "a", "new": "b" * 12}), ("get", "/api/backup", None),
+                               ("post", f"/api/p/{pid}/opps/{oid}/log", {"kind": "sent"}), ("post", f"/api/p/{pid}/opps/{oid}/optout", {}),
+                               ("put", f"/api/p/{pid}/opps/{oid}/basis", {"type": "consent"}), ("post", f"/api/p/{pid}/purge", None),
+                               ("post", f"/api/p/{pid}/drafts/{did}/decision", {"approve": True, "recipient": "x"})):
+        r = getattr(cl, method)(path, headers=h, **({"json": body} if body is not None else {}))
+        assert r.status_code == 403, path                                                                 # للمالك وحده
+    assert cl.put(f"/api/p/{pid}/config", json={"compliance": [{"country": "SA", "notes": "x"}]}, headers=h).status_code == 403
+    assert cl.put(f"/api/p/{pid}/config", json={"key_slot": "PILOT"}, headers=h).status_code == 200
+    assert any(a["user"] == "agent" for a in cl.get("/api/audit", headers=h).json())                      # كل ما يفعله يُسجَّل باسمه
