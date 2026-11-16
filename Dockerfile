@@ -13,7 +13,7 @@ COPY static/ static/
 # القرص الدائم يُركَّب على /data. بدونه تضيع البيانات عند كل إعادة نشر.
 RUN useradd --create-home --uid 10001 sellfalcon && mkdir -p /data && chown sellfalcon:sellfalcon /data
 USER sellfalcon
-VOLUME /data
+# لا سطر VOLUME هنا: بعض المنصات (Railway) ترفضه وتدير القرص من عندها. ركّب القرص الدائم على /data من المنصة.
 
 # عملية واحدة عمدًا (انظر server.py). PORT تضبطه الاستضافة.
 CMD ["sh", "-c", "exec uvicorn server:application --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --proxy-headers --forwarded-allow-ips='*'"]
