@@ -34,7 +34,7 @@
 
 ## 3. الكود
 
-- المستودع: `github.com/augaish/sell-falcon` (خاص). الوسم: `handoff-1`.
+- المستودع: `github.com/augaish/sell-falcon` (خاص). الفرع: `claude/hosted-app`. انشر من آخر التزام عليه، وسجّل رقم الالتزام الذي نشرته.
 - البناء: `Dockerfile` في جذر المستودع. **لم يُبنَ بعد على أي جهاز**؛ ابنِه وتحقق.
 - أمر التشغيل (موجود في الـDockerfile): `uvicorn server:application --host 0.0.0.0 --port $PORT --workers 1`
 - Python 3.12. الاعتماديات في `requirements.txt`.
