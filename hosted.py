@@ -156,4 +156,23 @@ def api_draft_llm(pid: int, oid: int, body: dict = Body(default={}), u=Depends(A
     return D.draft_llm(pid, oid, _project_provider(pid), lang="en" if body.get("lang") == "en" else "ar", user=u["email"])
 
 
+@router.get("/api/backup")
+def backup_download(u=Depends(A.auth)):
+    """نسخة احتياطية متسقة لكل البيانات، للتنزيل خارج قرص الاستضافة. للمالك فقط: فيها كل بيانات النظام."""
+    if u["role"] != "owner":
+        raise HTTPException(403, "للمالك فقط")
+    import tempfile
+
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    import manage
+    fd, path = tempfile.mkstemp(prefix="sellfalcon-backup-", suffix=".tar.gz")
+    os.close(fd)
+    manage.backup(path)
+    A.audit(u["email"], None, "backup.download")
+    return FileResponse(path, media_type="application/gzip", filename=f"sellfalcon-backup-{A.now()[:10]}.tar.gz",
+                        background=BackgroundTask(os.unlink, path))
+
+
 A.app.include_router(router)

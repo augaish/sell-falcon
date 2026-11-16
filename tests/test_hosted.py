@@ -233,3 +233,24 @@ def test_project_model_buttons_stay_behind_gates(monkeypatch):
     assert o["drafts"][-1]["generator"] == "llm:claude-opus-5-5" and o["drafts"][-1]["status"] == "draft" and o["send_blockers"]
     assert len(api.calls) == 1 and api.calls[0]["model"] == OPUS
     assert cl.get("/api/claude/status").json()["project_slots"] == [{"project": "P", "slot": "PROJ", "key_present": True, "workspace_id": WS}]
+
+
+def test_backup_download_is_owner_only_and_restorable(tmp_path):
+    import tarfile
+    cl = login(TestClient(A.app))
+    pid = cl.post("/api/projects", json={"name": "P"}).json()["id"]
+    cl.post(f"/api/p/{pid}/opps", json={"name": "جهة للنسخ"})
+    r = cl.get("/api/backup")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/gzip" and "attachment" in r.headers["content-disposition"]
+    (tmp_path / "b.tar.gz").write_bytes(r.content)
+    with tarfile.open(tmp_path / "b.tar.gz") as t:
+        names = t.getnames()
+    assert any(n.endswith("core.db") for n in names) and any(n.endswith(f"projects/{pid}.db") for n in names)
+    import manage
+    manage.restore(str(tmp_path / "b.tar.gz"), str(tmp_path / "restored"))
+    assert any(a["action"] == "backup.download" for a in cl.get("/api/audit").json())
+    A.create_user("v@x.test", "pw-viewer-123456", "viewer")
+    v = TestClient(A.app)
+    v.post("/api/login", json={"email": "v@x.test", "password": "pw-viewer-123456"})
+    assert v.get("/api/backup").status_code == 403
+    assert TestClient(A.app).get("/api/backup").status_code == 401
