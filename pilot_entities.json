@@ -1,0 +1,25 @@
+{
+  "_note": "جهات التجربة الأولية. كل جهة: اسمها وموقعها كما ظهرا في نتيجة بحث بتاريخ found_at، ورابط تلك النتيجة. لا معلومات أخرى؛ ما عداها يُقرأ من موقع الجهة نفسه.",
+  "found_at": "2026-11-17",
+  "Calgym": [
+    {"name": "Fitness Time (وقت اللياقة)", "website": "https://fitnesstime.com.sa/en", "source_url": "https://fitnesstime.com.sa/en"},
+    {"name": "Sport Clubs Company (Body Masters)", "website": "https://sportclubscompany.com.sa/en/our-company", "source_url": "https://sportclubscompany.com.sa/en/our-company"},
+    {"name": "Fitness First KSA", "website": "https://ksa.fitnessfirstme.com/", "source_url": "https://ksa.fitnessfirstme.com/"},
+    {"name": "KUN Sports", "website": "https://kunsports.com/", "source_url": "https://kunsports.com/"},
+    {"name": "IN2 Fitness", "website": "https://in2fitness.sa/", "source_url": "https://www.timeoutjeddah.com/sport-adventure/features-sport-adventure/gyms-in-jeddah"}
+  ],
+  "Oshhh.fun": [
+    {"name": "WOTN for Event Management", "website": "https://wotn.com.sa/en", "source_url": "https://wotn.com.sa/en"},
+    {"name": "Mada Event", "website": "https://madaevent.sa/", "source_url": "https://madaevent.sa/"},
+    {"name": "EVEX", "website": "https://evex.sa/", "source_url": "https://evex.sa/"},
+    {"name": "Venttat", "website": "https://venttat.sa/en", "source_url": "https://venttat.sa/en"},
+    {"name": "PEAK Events Operation Management", "website": "https://peak.sa.com/", "source_url": "https://peak.sa.com/"}
+  ],
+  "WTExcellence": [
+    {"name": "Modern Rabiyah Logistics", "website": "https://rabiyah.com/quality-compliance/", "source_url": "https://rabiyah.com/quality-compliance/"},
+    {"name": "Quality Esnad", "website": "https://qualityesnad.com.sa/", "source_url": "https://qualityesnad.com.sa/about-iso-certification-company/"},
+    {"name": "Saudi ISO (Envirolink)", "website": "https://saudiiso.com/about-us/", "source_url": "https://saudiiso.com/about-us/"},
+    {"name": "Qdot KSA", "website": "https://qdot-ksa.com/", "source_url": "https://qdot-ksa.com/"},
+    {"name": "Nawat Al Jawdah", "website": "https://nawataljawdah.com/our-service/iso-certification-and-consultant/", "source_url": "https://nawataljawdah.com/our-service/iso-certification-and-consultant/"}
+  ]
+}

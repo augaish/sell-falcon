@@ -1026,6 +1026,7 @@ def audit_list(u=Depends(auth)):
 
 import discovery  # noqa: E402,F401  (في آخر الملف: discovery يسجّل مساراته بنفسه أيًّا كان ترتيب الاستيراد)
 import hosted  # noqa: E402,F401
+import pilot  # noqa: E402,F401
 
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 

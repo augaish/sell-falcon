@@ -7,7 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY app.py discovery.py hosted.py provider.py spend.py synthetic_batch.py server.py manage.py ./
+COPY app.py discovery.py hosted.py pilot.py provider.py spend.py synthetic_batch.py server.py manage.py pilot_entities.json ./
 COPY static/ static/
 
 # القرص الدائم يُركَّب على /data. بدونه تضيع البيانات عند كل إعادة نشر.

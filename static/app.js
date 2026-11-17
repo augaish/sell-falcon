@@ -370,7 +370,30 @@ async function viewSafety() {
   const show = (x) => { S.claudeOut = JSON.stringify(x, null, 2); render(); };
   const run = (fn) => async () => { try { show(await fn()); } catch (e) { fail(e); S.claudeOut = e.message + (e.detail && e.detail.reasons ? "\n" + e.detail.reasons.join("\n") : ""); render(); } };
   const lr = cl.last_result;
+  const pl = await api("GET", "/pilot/status");
+  const pj = pl.job || {};
+  const total = pl.projects.reduce((n, x) => n + x.entities, 0);
+  if (pj.state === "running") setTimeout(() => { if (document.getElementById("pilot-card")) render(); }, 5000);
+  const pilotCard = h("section", { class: "card", id: "pilot-card" }, h("h2", {}, "التجربة الأولية على جهات حقيقية"),
+    h("p", { class: "muted" }, `لكل جهة: قراءة الصفحة الرئيسية لموقعها وصفحة شروطه، ثم استخراج المجال وسبب الملاءمة ومسودة تعريفية تنتظر مراجعتك. لا إرسال ولا اعتماد آلي. يُرسل إلى Claude مقتطف قصير من الصفحة الرئيسية بلا أسماء أشخاص ولا عناوين. حد كل مشروع $${pl.cap_usd}، وليس سقفًا مضمونًا. يتوقف التشغيل عند أي طلب غير محسوم.`),
+    h("ul", { class: "list" },
+      h("li", {}, "مفتاح خانة PILOT موجود: ", yes(pl.slot.key_present), " المساحة ", h("span", { class: "ltr" }, pl.slot.workspace_id || "غير مضبوطة"), " المنظمة ", h("span", { class: "ltr" }, pl.organization_id || "غير مضبوطة")),
+      pl.projects.map((x) => h("li", {}, `${x.project}: ${x.entities} جهات`))),
+    h("div", { class: "row" },
+      h("button", { disabled: pj.state === "running" || !total, onclick: async () => {
+        if (!confirm(`ستُقرأ مواقع ${total} جهة وتُرسل طلبات مدفوعة إلى Claude (المتوقع أقل من دولار للجميع). بضغطك تقرّ بأنك قرأت خلاصة المراجعة وتقبلها. لا رسائل تُرسل. متابعة؟`)) return;
+        try { await api("POST", "/pilot/start", { confirm: true, accept_review: true }); render(); } catch (e) { fail(e); }
+      } }, pj.state === "running" ? "تعمل الآن…" : "شغّل التجربة"),
+      h("button", { class: "ghost", onclick: () => show(pj) }, "اعرض النتيجة كاملة")),
+    pj.state && pj.state !== "idle" ? h("div", { class: "draft" },
+      h("p", {}, h("span", { class: "pill " + (pj.state === "done" ? "act" : "est") }, pj.state === "done" ? "اكتملت" : pj.state === "running" ? "تعمل" : "توقفت"),
+        pj.total_actual != null ? ` فعلي $${pj.total_actual} · غير محسوم $${pj.total_unresolved}` : ""),
+      pj.stop_reason ? h("p", { class: "warn" }, "سبب التوقف: " + pj.stop_reason) : null,
+      (pj.projects || []).map((x) => h("div", {}, h("b", {}, x.project), x.ledger ? h("span", { class: "muted ltr" }, ` $${x.ledger.actual}`) : null,
+        h("ul", { class: "list" }, x.entities.map((e) => h("li", {}, h("b", {}, e.name), " — ", e.status, e.cost ? h("span", { class: "muted ltr" }, ` $${e.cost}`) : null,
+          e.error ? h("div", { class: "warn" }, e.error) : null, e.terms_excerpt ? h("div", { class: "muted" }, "من الشروط: " + e.terms_excerpt) : null)))))) : null);
   return [
+    pilotCard,
     h("section", { class: "card" }, h("h2", {}, "Claude والتجربة المصطنعة"),
       h("p", { class: "muted" }, "المفاتيح تُقرأ من أسرار الاستضافة ولا تظهر هنا. يُعرض وجودها فقط."),
       h("ul", { class: "list" },

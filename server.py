@@ -35,6 +35,10 @@ def build() -> FastAPI:
     seeded = A.bootstrap_projects()
     if seeded:
         print("sellfalcon: initial projects created:", ", ".join(seeded), flush=True)
+    import pilot
+    added = pilot.seed_pilot()
+    if added:
+        print("sellfalcon: pilot entities added:", added, flush=True)
     base = A.base_path()
     if not base:
         return A.app
